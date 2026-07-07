@@ -21,28 +21,28 @@ export function createSceneContext(container: HTMLElement): SceneContext {
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.3;
+  renderer.toneMappingExposure = 1.45;
   container.appendChild(renderer.domElement);
 
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(BG_COLOR);
-  scene.fog = new THREE.FogExp2(BG_COLOR, 0.008);
+  scene.fog = new THREE.FogExp2(BG_COLOR, 0.0055);
 
   // Environment reflections so mirror faces, metal, and tiles read as glossy.
   const pmrem = new THREE.PMREMGenerator(renderer);
   scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-  scene.environmentIntensity = 0.5;
+  scene.environmentIntensity = 0.7;
 
   const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 300);
 
-  scene.add(new THREE.HemisphereLight(0x5a6f9c, 0x141826, 1.25));
-  const keyLight = new THREE.DirectionalLight(0xeaf2ff, 2.0);
+  scene.add(new THREE.HemisphereLight(0x5a6f9c, 0x141826, 1.5));
+  const keyLight = new THREE.DirectionalLight(0xeaf2ff, 2.3);
   keyLight.position.set(6, 12, 4);
   scene.add(keyLight);
-  const fillLight = new THREE.DirectionalLight(0xbcd0ff, 0.7);
+  const fillLight = new THREE.DirectionalLight(0xbcd0ff, 0.85);
   fillLight.position.set(-5, 6, 8);
   scene.add(fillLight);
-  const rimLight = new THREE.DirectionalLight(0x2ae6ff, 0.8);
+  const rimLight = new THREE.DirectionalLight(0x2ae6ff, 0.9);
   rimLight.position.set(-8, 3, -6);
   scene.add(rimLight);
 

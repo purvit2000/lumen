@@ -221,7 +221,8 @@ h1 {
   inset: 0;
   z-index: 20;
   display: flex;
-  align-items: center;
+  /* "safe" keeps the top reachable when the map outgrows the viewport. */
+  align-items: safe center;
   justify-content: center;
   background: radial-gradient(ellipse at 50% 30%, rgba(5, 7, 15, 0.15), rgba(5, 7, 15, 0.7));
   opacity: 1;

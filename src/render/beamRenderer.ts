@@ -35,7 +35,7 @@ export class BeamRenderer {
       const quat = new THREE.Quaternion().setFromUnitVectors(UP, dir);
 
       const coreMat = new THREE.MeshBasicMaterial({ color: 0xffffff, toneMapped: false });
-      const core = new THREE.Mesh(new THREE.CylinderGeometry(0.028, 0.028, length, 8), coreMat);
+      const core = new THREE.Mesh(new THREE.CylinderGeometry(0.036, 0.036, length, 8), coreMat);
       core.position.copy(mid);
       core.quaternion.copy(quat);
       this.group.add(core);
@@ -44,12 +44,12 @@ export class BeamRenderer {
       const haloMat = new THREE.MeshBasicMaterial({
         color: colorHex,
         transparent: true,
-        opacity: 0.32,
+        opacity: 0.38,
         blending: THREE.AdditiveBlending,
         depthWrite: false,
         toneMapped: false,
       });
-      const halo = new THREE.Mesh(new THREE.CylinderGeometry(0.085, 0.085, length, 8), haloMat);
+      const halo = new THREE.Mesh(new THREE.CylinderGeometry(0.115, 0.115, length, 8), haloMat);
       halo.position.copy(mid);
       halo.quaternion.copy(quat);
       this.group.add(halo);
@@ -83,7 +83,7 @@ export class BeamRenderer {
   }
 
   update(time: number): void {
-    const shimmer = 0.32 + Math.sin(time * 6) * 0.07 + (this.flaring ? 0.25 : 0);
+    const shimmer = 0.38 + Math.sin(time * 6) * 0.07 + (this.flaring ? 0.25 : 0);
     for (const m of this.haloMats) m.opacity = shimmer;
     for (const s of this.sparks) {
       const p = 0.42 + Math.sin(time * 9 + s.position.x * 3) * 0.14;

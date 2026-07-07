@@ -2,7 +2,9 @@
 
 A 3D laser-and-mirrors puzzle game for the browser. Rotate mirrors on
 floating islands to route glowing beams into every crystal target, across
-an 8-mission campaign selected from a constellation roadmap.
+a 13-mission campaign selected from a constellation roadmap. The back five
+missions go fully vertical: multi-floor islands where tilt mirrors,
+floor-jumping wormholes, and splitters carry the light between grid layers.
 
 Built with Three.js + TypeScript + Vite. No physics engine — beam logic is a
 pure grid simulation ([beamTracer.ts](src/core/beamTracer.ts)) and the renderer
@@ -36,6 +38,11 @@ npm run build    # type-check + static bundle in dist/
 6. **Trichroma** — three emitters, three blends
 7. **Wormhole** — portal pairs, heading preserved
 8. **Ascension** — tilt mirrors send light between grid layers
+9. **Skybridge** — free vertical routing across two floors
+10. **Crossfire** — color mixing up on the sky layer
+11. **Wormhole Lift** — a portal whose twin sits on the upper floor
+12. **The Spire** — three floors, summit crystal and back
+13. **Crown of Light** — finale: tilts + splitter + color mixing
 
 ## Adding a level
 

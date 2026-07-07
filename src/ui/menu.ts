@@ -21,14 +21,20 @@ export function createMenu(opts: {
   root.id = 'menu';
   document.body.appendChild(root);
 
+  /** Serpentine rows of four, bottom-up; the map grows taller as rows fill. */
+  function mapHeight(count: number): number {
+    return 180 + Math.ceil(count / 4) * 190;
+  }
+
   function nodePositions(count: number): [number, number][] {
     const xs = [130, 375, 620, 865];
+    const bottom = mapHeight(count) - 130;
     const out: [number, number][] = [];
     for (let i = 0; i < count; i++) {
       const row = Math.floor(i / 4);
       const col = i % 4;
       const x = xs[row % 2 === 0 ? col : 3 - col];
-      const y = 430 - row * 190 + (col % 2 === 0 ? 0 : 30);
+      const y = bottom - row * 190 + (col % 2 === 0 ? 0 : 30);
       out.push([x, y]);
     }
     return out;
@@ -100,7 +106,7 @@ export function createMenu(opts: {
         <div class="menu-sub">Bend the light. Wake the crystals.</div>
         <div class="menu-divider"></div>
         <div class="menu-progress"><span class="progress-star">★</span> ${totalStars} / ${levels.length * 3} &nbsp;·&nbsp; ${completed} / ${levels.length} missions</div>
-        <svg class="roadmap" viewBox="0 0 1000 560" role="list" aria-label="Mission map">
+        <svg class="roadmap" viewBox="0 0 1000 ${mapHeight(levels.length)}" role="list" aria-label="Mission map">
           <defs>
             <filter id="node-glow" x="-80%" y="-80%" width="260%" height="260%">
               <feGaussianBlur stdDeviation="7" result="blur"></feGaussianBlur>

@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { DIR_VEC, MIRROR_PORTS } from '../core/beamTracer';
 import { COLOR_HEX, type Dir, type EntityDef, type GridPos, type LevelDef, type MirrorOrient } from '../core/types';
 import { tween } from './effects';
-import { hazardTexture, metalTexture, tileTexture, wallTextures } from './textures';
+import { hazardTextures, metalTextures, rockTextures, tileTextures, wallTextures } from './textures';
 
 /** Colors for the two rotation directions, shared by gizmo and DOM buttons. */
 export const CW_HEX = 0xffa63d; // clockwise = amber
@@ -93,11 +93,14 @@ export class LevelView {
     const w = this.worldOf(e);
     root.position.set(w.x, e.pos.y, w.z);
     if (e.pos.y > 0) {
+      const tiles = tileTextures();
       const platform = new THREE.Mesh(
         new THREE.CylinderGeometry(0.5, 0.56, 0.14, 6),
         new THREE.MeshStandardMaterial({
-          map: tileTexture(),
-          color: 0x8fa4c8,
+          map: tiles.map,
+          bumpMap: tiles.bumpMap,
+          bumpScale: 0.6,
+          color: 0x9db2d8,
           roughness: 0.5,
           metalness: 0.5,
         }),
@@ -119,20 +122,23 @@ export class LevelView {
     const { x: gx, z: gz } = this.level.gridSize;
     const tileGeo = new THREE.BoxGeometry(0.94, 0.18, 0.94);
     const edgeGeo = new THREE.EdgesGeometry(new THREE.BoxGeometry(0.95, 0.19, 0.95));
-    const tex = tileTexture();
+    const tiles = tileTextures();
 
     for (let x = 0; x < gx; x++) {
       for (let z = 0; z < gz; z++) {
-        // Checkerboard tint so the grid is legible at a glance.
+        // Checkerboard tint so the grid is legible at a glance; contrast is
+        // deliberately strong so the plating detail reads from play distance.
         const dark = (x + z) % 2 === 0;
-        const shade = (dark ? 0.78 : 1.05) * (0.92 + Math.random() * 0.16);
+        const shade = (dark ? 0.72 : 1.18) * (0.94 + Math.random() * 0.12);
         const mat = new THREE.MeshStandardMaterial({
-          map: tex,
-          color: new THREE.Color(0x9fb2d6).multiplyScalar(shade),
-          roughness: 0.5,
+          map: tiles.map,
+          bumpMap: tiles.bumpMap,
+          bumpScale: 0.7,
+          color: new THREE.Color(0xa6b9dd).multiplyScalar(shade),
+          roughness: 0.48,
           metalness: 0.5,
           emissive: 0x0a1830,
-          emissiveIntensity: 0.5,
+          emissiveIntensity: 0.3,
         });
         const tile = new THREE.Mesh(tileGeo, mat);
         const w = gridToWorld({ x, y: 0, z }, this.level.gridSize);
@@ -142,7 +148,7 @@ export class LevelView {
 
         const edges = new THREE.LineSegments(
           edgeGeo,
-          new THREE.LineBasicMaterial({ color: 0x53d4ec, transparent: true, opacity: 0.5 }),
+          new THREE.LineBasicMaterial({ color: 0x5fe6ff, transparent: true, opacity: 0.8 }),
         );
         tile.add(edges);
 
@@ -152,20 +158,33 @@ export class LevelView {
     }
 
     // Rocky shards hanging beneath the island so it reads as a floating rock.
+    const rock = rockTextures();
     const shardMat = new THREE.MeshStandardMaterial({
-      color: 0x1a2236,
-      roughness: 0.85,
-      metalness: 0.2,
+      map: rock.map,
+      bumpMap: rock.bumpMap,
+      bumpScale: 1.2,
+      color: 0x9aa8c6,
+      roughness: 0.9,
+      metalness: 0.15,
       flatShading: true,
     });
-    const shardCount = 9;
+    // One broad keel under the center, then a ring of smaller stalactites.
+    const keelHeight = 3.2 + Math.min(gx, gz) * 0.35;
+    const keel = new THREE.Mesh(
+      new THREE.ConeGeometry(Math.min(gx, gz) * 0.34, keelHeight, 7),
+      shardMat,
+    );
+    keel.position.set(0, -keelHeight / 2 - 0.3, 0);
+    keel.rotation.x = Math.PI;
+    this.group.add(keel);
+    const shardCount = Math.max(9, gx + 4);
     for (let i = 0; i < shardCount; i++) {
       const radius = 0.5 + Math.random() * 1.6;
       const height = 1.5 + Math.random() * 3.2;
       const geo = new THREE.ConeGeometry(radius, height, 5);
       const shard = new THREE.Mesh(geo, shardMat);
       const a = (i / shardCount) * Math.PI * 2 + Math.random() * 0.6;
-      const r = Math.random() * (Math.min(gx, gz) / 2 - 1);
+      const r = 1 + Math.random() * (Math.min(gx, gz) / 2 - 1);
       // Keep the cone's top safely below the tile layer.
       shard.position.set(Math.cos(a) * r, -height / 2 - 0.35, Math.sin(a) * r);
       shard.rotation.x = Math.PI; // point down
@@ -205,10 +224,13 @@ export class LevelView {
 
   /** Shared textured pedestal, faintly tinted by its device color. */
   private pedestal(tint: number): THREE.Mesh {
+    const metal = metalTextures();
     const mesh = new THREE.Mesh(
       new THREE.CylinderGeometry(0.17, 0.26, 0.25, 8),
       new THREE.MeshStandardMaterial({
-        map: metalTexture(),
+        map: metal.map,
+        bumpMap: metal.bumpMap,
+        bumpScale: 0.5,
         color: 0x3a4664,
         roughness: 0.4,
         metalness: 0.85,
@@ -248,10 +270,13 @@ export class LevelView {
     root.rotation.y = FACING_ANGLE[e.facing ?? 'E'];
 
     const colorHex = COLOR_HEX[e.color ?? 'white'];
+    const metal = metalTextures();
     const body = new THREE.Mesh(
       new THREE.CylinderGeometry(0.3, 0.38, 0.55, 8),
       new THREE.MeshStandardMaterial({
-        map: metalTexture(),
+        map: metal.map,
+        bumpMap: metal.bumpMap,
+        bumpScale: 0.5,
         color: 0x3a4664,
         roughness: 0.4,
         metalness: 0.85,
@@ -266,7 +291,9 @@ export class LevelView {
     const barrel = new THREE.Mesh(
       new THREE.CylinderGeometry(0.11, 0.14, 0.5, 12),
       new THREE.MeshStandardMaterial({
-        map: metalTexture(),
+        map: metal.map,
+        bumpMap: metal.bumpMap,
+        bumpScale: 0.4,
         color: 0x515f80,
         roughness: 0.3,
         metalness: 0.95,
@@ -293,15 +320,17 @@ export class LevelView {
 
   private buildWall(e: EntityDef): void {
     const root = new THREE.Group();
-    const { map, emissiveMap } = wallTextures();
+    const { map, emissiveMap, bumpMap } = wallTextures();
     const wall = new THREE.Mesh(
       new THREE.BoxGeometry(0.88, 1.15, 0.88),
       new THREE.MeshStandardMaterial({
         map,
         emissiveMap,
+        bumpMap,
+        bumpScale: 0.8,
         emissive: 0x4fe6ff,
         emissiveIntensity: 1.4,
-        color: 0x8a9cc0,
+        color: 0x94a6ca,
         roughness: 0.45,
         metalness: 0.6,
       }),
@@ -420,10 +449,13 @@ export class LevelView {
 
   private buildPortal(e: EntityDef): void {
     const root = new THREE.Group();
+    const metal = metalTextures();
     const base = new THREE.Mesh(
       new THREE.CylinderGeometry(0.3, 0.36, 0.12, 8),
       new THREE.MeshStandardMaterial({
-        map: metalTexture(),
+        map: metal.map,
+        bumpMap: metal.bumpMap,
+        bumpScale: 0.5,
         color: 0x4a3a2c,
         roughness: 0.4,
         metalness: 0.85,
@@ -474,11 +506,14 @@ export class LevelView {
     const root = new THREE.Group();
     root.userData.entityId = e.id;
     const locked = e.rotatable !== true;
+    const metal = metalTextures();
 
     const base = new THREE.Mesh(
       new THREE.CylinderGeometry(0.2, 0.28, 0.18, 8),
       new THREE.MeshStandardMaterial({
-        map: metalTexture(),
+        map: metal.map,
+        bumpMap: metal.bumpMap,
+        bumpScale: 0.5,
         color: locked ? 0x6b4a26 : 0x3a4664,
         roughness: 0.4,
         metalness: 0.85,
@@ -492,7 +527,9 @@ export class LevelView {
     const pillar = new THREE.Mesh(
       new THREE.CylinderGeometry(0.05, 0.05, 0.3, 8),
       new THREE.MeshStandardMaterial({
-        map: metalTexture(),
+        map: metal.map,
+        bumpMap: metal.bumpMap,
+        bumpScale: 0.4,
         color: 0x515f80,
         roughness: 0.3,
         metalness: 0.95,
@@ -514,6 +551,15 @@ export class LevelView {
       emissiveIntensity: locked ? 0.12 : 0.06,
     });
     const frame = new THREE.Mesh(new THREE.BoxGeometry(0.72, 0.8, 0.07), frameMat);
+    const frameEdges = new THREE.LineSegments(
+      new THREE.EdgesGeometry(frame.geometry),
+      new THREE.LineBasicMaterial({
+        color: locked ? 0xd69634 : 0x5fe6ff,
+        transparent: true,
+        opacity: 0.55,
+      }),
+    );
+    frame.add(frameEdges);
     panel.add(frame);
 
     const faceMat = new THREE.MeshStandardMaterial({
@@ -529,8 +575,11 @@ export class LevelView {
     panel.add(face);
 
     // Amber hazard stripes so the absorbing back is unmistakable.
+    const hazard = hazardTextures();
     const backMat = new THREE.MeshStandardMaterial({
-      map: hazardTexture(),
+      map: hazard.map,
+      bumpMap: hazard.bumpMap,
+      bumpScale: 0.6,
       color: 0xffffff,
       roughness: 0.75,
       metalness: 0.25,
