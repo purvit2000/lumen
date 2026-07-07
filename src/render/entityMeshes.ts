@@ -3,6 +3,7 @@ import { DIR_VEC, MIRROR_PORTS } from '../core/beamTracer';
 import { COLOR_HEX, type Dir, type EntityDef, type GridPos, type LevelDef, type MirrorOrient } from '../core/types';
 import { tween } from './effects';
 import { hazardTextures, metalTextures, rockTextures, tileTextures, wallTextures } from './textures';
+import { WORLD_THEMES, type WorldTheme } from './themes';
 
 /** Colors for the two rotation directions, shared by gizmo and DOM buttons. */
 export const CW_HEX = 0xffa63d; // clockwise = amber
@@ -78,7 +79,10 @@ export class LevelView {
   private spinDir: -1 | 1 = 1;
   private spinUntil = 0;
 
-  constructor(private readonly level: LevelDef) {
+  constructor(
+    private readonly level: LevelDef,
+    private readonly theme: WorldTheme = WORLD_THEMES[0],
+  ) {
     this.buildIsland();
     for (const e of level.entities) this.buildEntity(e);
     this.buildGizmo();
@@ -93,14 +97,14 @@ export class LevelView {
     const w = this.worldOf(e);
     root.position.set(w.x, e.pos.y, w.z);
     if (e.pos.y > 0) {
-      const tiles = tileTextures();
+      const tiles = tileTextures(this.theme);
       const platform = new THREE.Mesh(
         new THREE.CylinderGeometry(0.5, 0.56, 0.14, 6),
         new THREE.MeshStandardMaterial({
           map: tiles.map,
           bumpMap: tiles.bumpMap,
           bumpScale: 0.6,
-          color: 0x9db2d8,
+          color: this.theme.tileTint,
           roughness: 0.5,
           metalness: 0.5,
         }),
@@ -108,7 +112,7 @@ export class LevelView {
       platform.position.y = -0.08;
       const edges = new THREE.LineSegments(
         new THREE.EdgesGeometry(platform.geometry),
-        new THREE.LineBasicMaterial({ color: 0x53d4ec, transparent: true, opacity: 0.6 }),
+        new THREE.LineBasicMaterial({ color: this.theme.edge, transparent: true, opacity: 0.6 }),
       );
       platform.add(edges);
       root.add(platform);
@@ -122,7 +126,7 @@ export class LevelView {
     const { x: gx, z: gz } = this.level.gridSize;
     const tileGeo = new THREE.BoxGeometry(0.94, 0.18, 0.94);
     const edgeGeo = new THREE.EdgesGeometry(new THREE.BoxGeometry(0.95, 0.19, 0.95));
-    const tiles = tileTextures();
+    const tiles = tileTextures(this.theme);
 
     for (let x = 0; x < gx; x++) {
       for (let z = 0; z < gz; z++) {
@@ -134,7 +138,7 @@ export class LevelView {
           map: tiles.map,
           bumpMap: tiles.bumpMap,
           bumpScale: 0.7,
-          color: new THREE.Color(0xa6b9dd).multiplyScalar(shade),
+          color: new THREE.Color(this.theme.tileTint).multiplyScalar(shade),
           roughness: 0.48,
           metalness: 0.5,
           emissive: 0x0a1830,
@@ -148,7 +152,7 @@ export class LevelView {
 
         const edges = new THREE.LineSegments(
           edgeGeo,
-          new THREE.LineBasicMaterial({ color: 0x5fe6ff, transparent: true, opacity: 0.8 }),
+          new THREE.LineBasicMaterial({ color: this.theme.edge, transparent: true, opacity: 0.8 }),
         );
         tile.add(edges);
 
@@ -197,7 +201,7 @@ export class LevelView {
       const geo = new THREE.OctahedronGeometry(0.1 + Math.random() * 0.08);
       const mat = new THREE.MeshStandardMaterial({
         color: 0x0a2a33,
-        emissive: 0x1fb8d4,
+        emissive: this.theme.accent,
         emissiveIntensity: 0.7,
         roughness: 0.2,
         metalness: 0.1,
@@ -320,7 +324,7 @@ export class LevelView {
 
   private buildWall(e: EntityDef): void {
     const root = new THREE.Group();
-    const { map, emissiveMap, bumpMap } = wallTextures();
+    const { map, emissiveMap, bumpMap } = wallTextures(this.theme);
     const wall = new THREE.Mesh(
       new THREE.BoxGeometry(0.88, 1.15, 0.88),
       new THREE.MeshStandardMaterial({
@@ -328,7 +332,7 @@ export class LevelView {
         emissiveMap,
         bumpMap,
         bumpScale: 0.8,
-        emissive: 0x4fe6ff,
+        emissive: this.theme.accent,
         emissiveIntensity: 1.4,
         color: 0x94a6ca,
         roughness: 0.45,
@@ -339,7 +343,7 @@ export class LevelView {
     wall.castShadow = true;
     const edges = new THREE.LineSegments(
       new THREE.EdgesGeometry(wall.geometry),
-      new THREE.LineBasicMaterial({ color: 0x53c8e4, transparent: true, opacity: 0.7 }),
+      new THREE.LineBasicMaterial({ color: this.theme.edge, transparent: true, opacity: 0.7 }),
     );
     wall.add(edges);
     root.add(wall);
@@ -726,6 +730,64 @@ export class LevelView {
       this.gizmo.visible = false;
       this.previewDir = null;
     }
+  }
+
+  private hintGhost: THREE.Mesh | null = null;
+
+  /**
+   * Hint: hover a translucent gold panel at the mirror's *solved* orientation
+   * for a couple of seconds, pulsing its frame so the player's eye finds it.
+   */
+  showHintGhost(id: string, orient: MirrorOrient): boolean {
+    const m = this.mirrors.get(id);
+    if (!m || !m.rotatable) return false;
+
+    if (this.hintGhost) {
+      this.group.remove(this.hintGhost);
+      this.hintGhost.geometry.dispose();
+      (this.hintGhost.material as THREE.Material).dispose();
+      this.hintGhost = null;
+    }
+
+    const mat = new THREE.MeshBasicMaterial({
+      color: 0xffd23a,
+      transparent: true,
+      opacity: 0,
+      side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      toneMapped: false,
+    });
+    const ghost = new THREE.Mesh(new THREE.PlaneGeometry(0.68, 0.76), mat);
+    ghost.position.copy(m.root.position).add(new THREE.Vector3(0, 0.62, 0));
+    ghost.quaternion.copy(orientQuat(orient));
+    this.group.add(ghost);
+    this.hintGhost = ghost;
+
+    const frame = m.frameMat;
+    const baseEm = frame.emissiveIntensity;
+    tween(
+      2600,
+      (t) => {
+        // Three strong pulses that fade out toward the end.
+        const pulse = Math.abs(Math.sin(t * Math.PI * 3));
+        mat.opacity = pulse * 0.85 * (1 - t * 0.6);
+        frame.emissiveIntensity = baseEm + pulse * 1.6 * (1 - t);
+      },
+      {
+        ease: (t) => t,
+        onComplete: () => {
+          this.refreshFrameGlow();
+          if (this.hintGhost === ghost) {
+            this.group.remove(ghost);
+            ghost.geometry.dispose();
+            mat.dispose();
+            this.hintGhost = null;
+          }
+        },
+      },
+    );
+    return true;
   }
 
   /** World position of a mirror's panel, for anchoring the rotation buttons. */

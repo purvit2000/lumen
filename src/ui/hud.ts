@@ -3,6 +3,7 @@ export interface Hud {
   hide(): void;
   setLevel(number: number, name: string, hint: string | undefined, par: number): void;
   updateMoves(moves: number): void;
+  setUndoEnabled(enabled: boolean): void;
   showWin(stars: number, moves: number, par: number, hasNext: boolean): void;
   hideWin(): void;
 }
@@ -11,6 +12,8 @@ export function createHud(opts: {
   onReset: () => void;
   onNext: () => void;
   onMenu: () => void;
+  onUndo: () => void;
+  onHint: () => void;
 }): Hud {
   const root = document.getElementById('hud')!;
   root.innerHTML = `
@@ -21,6 +24,8 @@ export function createHud(opts: {
     </div>
     <div class="panel top-right">
       <button id="hud-menu" class="btn">☰ Missions</button>
+      <button id="hud-hint-btn" class="btn" title="Highlight a mirror that needs attention (H)">💡 Hint</button>
+      <button id="hud-undo" class="btn" title="Undo the last rotation (Z)" disabled>↶ Undo</button>
       <button id="hud-reset" class="btn">↺ Reset</button>
     </div>
     <div class="hint">
@@ -48,11 +53,14 @@ export function createHud(opts: {
   const starsEl = root.querySelector<HTMLElement>('#hud-stars')!;
   const detailEl = root.querySelector<HTMLElement>('#hud-win-detail')!;
   const nextBtn = root.querySelector<HTMLButtonElement>('#hud-next')!;
+  const undoBtn = root.querySelector<HTMLButtonElement>('#hud-undo')!;
 
   root.querySelector('#hud-reset')!.addEventListener('click', opts.onReset);
   root.querySelector('#hud-replay')!.addEventListener('click', opts.onReset);
   root.querySelector('#hud-menu')!.addEventListener('click', opts.onMenu);
   root.querySelector('#hud-to-menu')!.addEventListener('click', opts.onMenu);
+  root.querySelector('#hud-hint-btn')!.addEventListener('click', opts.onHint);
+  undoBtn.addEventListener('click', opts.onUndo);
   nextBtn.addEventListener('click', opts.onNext);
 
   let par = 0;
@@ -73,6 +81,9 @@ export function createHud(opts: {
     },
     updateMoves(moves) {
       movesEl.textContent = `Moves: ${moves} · Par: ${par}`;
+    },
+    setUndoEnabled(enabled) {
+      undoBtn.disabled = !enabled;
     },
     showWin(stars, moves, parMoves, hasNext) {
       starsEl.innerHTML = [1, 2, 3]

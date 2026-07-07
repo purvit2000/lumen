@@ -9,12 +9,20 @@ export interface RotateOutcome {
   justWon: boolean;
 }
 
+export interface UndoOutcome {
+  id: string;
+  orient: MirrorOrient;
+  /** The direction the mirror visually turns to revert (reverse of the move). */
+  dir: RotateDir;
+}
+
 export class GameState {
   readonly level: LevelDef;
   readonly orients = new Map<string, MirrorOrient>();
   moves = 0;
   won = false;
   trace: TraceResult;
+  private readonly history: { id: string; dir: RotateDir }[] = [];
 
   constructor(level: LevelDef) {
     this.level = level;
@@ -36,10 +44,28 @@ export class GameState {
     const next = cycle[this.orients.get(id)!];
     this.orients.set(id, next);
     this.moves += 1;
+    this.history.push({ id, dir: direction });
     this.trace = trace(this.level, this.orients);
     const justWon = !this.won && this.trace.allLit;
     if (justWon) this.won = true;
     return { orient: next, trace: this.trace, justWon };
+  }
+
+  get canUndo(): boolean {
+    return this.history.length > 0 && !this.won;
+  }
+
+  /** Revert the last rotation, refunding the move. */
+  undo(): UndoOutcome | null {
+    if (!this.canUndo) return null;
+    const { id, dir } = this.history.pop()!;
+    const back: RotateDir = dir === 1 ? -1 : 1;
+    const cycle = back === 1 ? MIRROR_CYCLE : MIRROR_CYCLE_REV;
+    const orient = cycle[this.orients.get(id)!];
+    this.orients.set(id, orient);
+    this.moves = Math.max(0, this.moves - 1);
+    this.trace = trace(this.level, this.orients);
+    return { id, orient, dir: back };
   }
 
   reset(): TraceResult {
@@ -48,6 +74,7 @@ export class GameState {
     }
     this.moves = 0;
     this.won = false;
+    this.history.length = 0;
     this.trace = trace(this.level, this.orients);
     return this.trace;
   }

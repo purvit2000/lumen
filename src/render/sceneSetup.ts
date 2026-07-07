@@ -4,6 +4,7 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import type { WorldTheme } from './themes';
 
 export interface SceneContext {
   scene: THREE.Scene;
@@ -12,6 +13,8 @@ export interface SceneContext {
   composer: EffectComposer;
   /** Per-frame ambience animation (stars, nebula, dust). */
   updateAmbience: (time: number, dt: number) => void;
+  /** Recolor the world backdrop (rim light, nebulae) for a campaign act. */
+  applyTheme: (theme: WorldTheme) => void;
 }
 
 const BG_COLOR = 0x05070f;
@@ -48,7 +51,7 @@ export function createSceneContext(container: HTMLElement): SceneContext {
 
   const stars = buildStarfield();
   scene.add(stars);
-  const nebulae = buildNebulae();
+  const { group: nebulae, mats: nebulaMats } = buildNebulae();
   scene.add(nebulae);
   const dust = buildDust();
   scene.add(dust);
@@ -78,7 +81,12 @@ export function createSceneContext(container: HTMLElement): SceneContext {
     nebulae.rotation.y += dt * 0.002;
   };
 
-  return { scene, camera, renderer, composer, updateAmbience };
+  const applyTheme = (theme: WorldTheme) => {
+    rimLight.color.setHex(theme.accent);
+    nebulaMats.forEach((m, i) => m.color.setHex(theme.nebulae[i % theme.nebulae.length]));
+  };
+
+  return { scene, camera, renderer, composer, updateAmbience, applyTheme };
 }
 
 function buildStarfield(): THREE.Points {
@@ -134,8 +142,9 @@ export function getSparkTexture(): THREE.CanvasTexture {
   return sparkTexture;
 }
 
-function buildNebulae(): THREE.Group {
+function buildNebulae(): { group: THREE.Group; mats: THREE.SpriteMaterial[] } {
   const group = new THREE.Group();
+  const mats: THREE.SpriteMaterial[] = [];
   const tints = [0x1b2a5e, 0x143c4a, 0x2b1b4e];
   for (let i = 0; i < 4; i++) {
     const mat = new THREE.SpriteMaterial({
@@ -153,8 +162,9 @@ function buildNebulae(): THREE.Group {
     const s = 60 + i * 18;
     sprite.scale.set(s, s, 1);
     group.add(sprite);
+    mats.push(mat);
   }
-  return group;
+  return { group, mats };
 }
 
 function buildDust(): THREE.Points {

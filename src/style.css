@@ -135,6 +135,63 @@ h1 {
   background: rgba(42, 230, 255, 0.22);
 }
 
+/* Soundtrack toggle: dimmed with a slash feel while muted. */
+.btn.muted {
+  opacity: 0.4;
+  text-decoration: line-through;
+}
+
+/* ---------- Global music control (roadmap + in-game) ---------- */
+
+#audio-control {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--panel-bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 999px;
+  padding: 7px 14px 7px 8px;
+  backdrop-filter: blur(8px);
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
+}
+
+#audio-toggle {
+  border-radius: 50%;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  font-size: 16px;
+  line-height: 1;
+}
+
+#audio-volume {
+  width: 110px;
+  accent-color: var(--teal);
+  cursor: pointer;
+}
+
+/* When the centered hint pill would collide, float the music pill above it. */
+@media (max-width: 1100px) {
+  #audio-control {
+    bottom: 92px;
+  }
+}
+
+@media (max-width: 600px) {
+  #audio-control {
+    right: 10px;
+    bottom: 168px; /* clear the taller wrapped hint pill */
+    padding: 5px 10px 5px 6px;
+  }
+  #audio-volume {
+    width: 72px;
+  }
+}
+
 .win-overlay {
   position: absolute;
   inset: 0;
@@ -237,7 +294,8 @@ h1 {
 
 .menu-inner {
   width: min(96vw, 1040px);
-  padding: 24px 12px;
+  /* Extra bottom room so the last map row clears the floating music pill. */
+  padding: 24px 12px 84px;
   text-align: center;
 }
 

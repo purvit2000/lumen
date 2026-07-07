@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import type { WorldTheme } from './themes';
 
 /**
  * All surface detail is generated procedurally on canvases — no image
@@ -118,23 +119,20 @@ function toDataTexture(c: HTMLCanvasElement): THREE.CanvasTexture {
   return t;
 }
 
-let tileMaps: SurfaceMaps | null = null;
+const tileCache = new Map<string, SurfaceMaps>();
 /**
  * Floor tile: plated deck panel — brushed grain, a hex-grate inlay in the
- * middle, luminous teal frame, corner rivets, wear scratches and grime.
+ * middle, luminous frame in the world's glow color, corner rivets, wear
+ * scratches and grime. Cached per world theme.
  */
-export function tileTextures(): SurfaceMaps {
-  if (tileMaps) return tileMaps;
+export function tileTextures(theme: WorldTheme): SurfaceMaps {
+  const cached = tileCache.get(theme.id);
+  if (cached) return cached;
   const S = 512;
   const [c, g] = makeCanvas(S);
   const [bc, b] = makeCanvas(S);
 
-  // Base plate with a soft top-lit gradient.
-  const base = g.createLinearGradient(0, 0, 0, S);
-  base.addColorStop(0, '#33406440');
-  g.fillStyle = '#2b3554';
-  g.fillRect(0, 0, S, S);
-  g.fillStyle = base;
+  g.fillStyle = theme.tilePlate;
   g.fillRect(0, 0, S, S);
   b.fillStyle = '#808080';
   b.fillRect(0, 0, S, S);
@@ -186,11 +184,11 @@ export function tileTextures(): SurfaceMaps {
   g.beginPath();
   g.arc(S / 2, S / 2, 150, 0, Math.PI * 2);
   g.fill();
-  drawHexGrid(g, 'rgba(122,190,235,0.30)', 3);
+  drawHexGrid(g, `rgba(${theme.glowRGB},0.30)`, 3);
   drawHexGrid(g, 'rgba(6,10,20,0.55)', 1.5);
   drawHexGrid(b, '#4a4a4a', 4); // grooves between hex cells
   // Inlay ring seam.
-  g.strokeStyle = 'rgba(140,205,240,0.5)';
+  g.strokeStyle = `rgba(${theme.glowRGB},0.5)`;
   g.lineWidth = 4;
   g.beginPath();
   g.arc(S / 2, S / 2, 152, 0, Math.PI * 2);
@@ -213,10 +211,10 @@ export function tileTextures(): SurfaceMaps {
   b.strokeRect(4, 4, S - 8, S - 8);
 
   // Luminous inner frame.
-  g.strokeStyle = 'rgba(90,225,255,0.17)';
+  g.strokeStyle = `rgba(${theme.glowRGB},0.17)`;
   g.lineWidth = 30;
   g.strokeRect(24, 24, S - 48, S - 48);
-  g.strokeStyle = 'rgba(130,238,255,0.55)';
+  g.strokeStyle = `rgba(${theme.glowRGB},0.55)`;
   g.lineWidth = 7;
   g.strokeRect(17, 17, S - 34, S - 34);
   b.strokeStyle = '#b2b2b2'; // frame sits proud of the plate
@@ -233,22 +231,25 @@ export function tileTextures(): SurfaceMaps {
     rivet(g, b, x, y, 9);
   }
 
-  tileMaps = { map: toColorTexture(c), bumpMap: toDataTexture(bc) };
-  return tileMaps;
+  const maps = { map: toColorTexture(c), bumpMap: toDataTexture(bc) };
+  tileCache.set(theme.id, maps);
+  return maps;
 }
 
-let wallMaps: (SurfaceMaps & { emissiveMap: THREE.CanvasTexture }) | null = null;
+type WallMaps = SurfaceMaps & { emissiveMap: THREE.CanvasTexture };
+const wallCache = new Map<string, WallMaps>();
 /**
  * Wall block: stacked armor plates with seams, a louvered vent, bolts and
- * glowing circuit traces etched across the plating.
+ * glowing circuit traces etched across the plating. Cached per world theme.
  */
-export function wallTextures(): SurfaceMaps & { emissiveMap: THREE.CanvasTexture } {
-  if (wallMaps) return wallMaps;
+export function wallTextures(theme: WorldTheme): WallMaps {
+  const cached = wallCache.get(theme.id);
+  if (cached) return cached;
   const S = 512;
   const [c, g] = makeCanvas(S);
   const [ec, eg] = makeCanvas(S);
   const [bc, b] = makeCanvas(S);
-  g.fillStyle = '#252e4c';
+  g.fillStyle = theme.wallPlate;
   g.fillRect(0, 0, S, S);
   b.fillStyle = '#808080';
   b.fillRect(0, 0, S, S);
@@ -324,7 +325,7 @@ export function wallTextures(): SurfaceMaps & { emissiveMap: THREE.CanvasTexture
 
   // Circuit traces: dim conduit on the plate, bright on the emissive map.
   const drawTrace = (ctx: CanvasRenderingContext2D, alpha: number, lw: number) => {
-    ctx.strokeStyle = `rgba(120,240,255,${alpha})`;
+    ctx.strokeStyle = `rgba(${theme.traceRGB},${alpha})`;
     ctx.fillStyle = ctx.strokeStyle;
     ctx.lineWidth = lw;
     ctx.lineCap = 'round';
@@ -383,8 +384,9 @@ export function wallTextures(): SurfaceMaps & { emissiveMap: THREE.CanvasTexture
   b.lineWidth = 9;
   b.strokeRect(6, 6, S - 12, S - 12);
 
-  wallMaps = { map: toColorTexture(c), emissiveMap: toColorTexture(ec), bumpMap: toDataTexture(bc) };
-  return wallMaps;
+  const maps = { map: toColorTexture(c), emissiveMap: toColorTexture(ec), bumpMap: toDataTexture(bc) };
+  wallCache.set(theme.id, maps);
+  return maps;
 }
 
 let metalMaps: SurfaceMaps | null = null;

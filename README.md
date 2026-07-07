@@ -24,9 +24,18 @@ npm run build    # type-check + static bundle in dist/
   moves are saved in the browser (localStorage).
 - **Rotate mirrors**: click/tap a mirror to select it, then choose ⟲ or ⟳
   from the floating buttons to turn it the way you want. Beams reflect off a
-  mirror's face and are absorbed by its back.
+  mirror's face and are absorbed by its back. Hovering ⟲/⟳ ghost-previews
+  where the beam would go.
+- **Undo** (button or `Z`) refunds the last move; **Hint** (button or `H`)
+  pulses a gold ghost on one mirror that still disagrees with the solution.
 - Light **every crystal at once** to win. Par or better earns 3 stars.
-- Drag to orbit, scroll/pinch to zoom.
+- Drag to orbit, scroll/pinch to zoom. The floating ♪ pill (bottom-right,
+  on both the roadmap and in-game) toggles the generative ambient
+  soundtrack and sets its volume; the choice persists in localStorage.
+  All audio is WebAudio — no audio files.
+- The campaign plays in three visual acts: Azure Steel (1–4), Ember Ruins
+  (5–8) and Violet Void (9–13). Beams race visibly from their emitters, and
+  floor-to-floor dives trail falling sparks.
 
 ## Mechanics by mission
 

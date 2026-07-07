@@ -1,15 +1,17 @@
 import './style.css';
-import { MIRROR_CYCLE_REV, trace } from './core/beamTracer';
+import { MIRROR_CYCLE, MIRROR_CYCLE_REV, trace } from './core/beamTracer';
 import { GameState, type RotateDir } from './core/gameState';
 import { saveResult } from './core/progress';
 import { LEVELS } from './levels';
 import { sfx } from './audio/sfx';
 import { createSceneContext } from './render/sceneSetup';
+import { themeForMission } from './render/themes';
 import { LevelView, gridToWorld } from './render/entityMeshes';
 import { BeamRenderer } from './render/beamRenderer';
 import { updateTweens } from './render/effects';
 import { aimCameraForLevel, aimCameraForMenu, createCameraControls } from './input/cameraControls';
 import { setupPicking } from './input/picking';
+import { createAudioControl } from './ui/audioControl';
 import { createHud } from './ui/hud';
 import { createMenu } from './ui/menu';
 import { createRotator } from './ui/rotator';
@@ -57,14 +59,39 @@ const hud = createHud({
   onReset: () => resetLevel(),
   onNext: () => nextLevel(),
   onMenu: () => showMenu(),
+  onUndo: () => onUndo(),
+  onHint: () => onHint(),
 });
 const menu = createMenu({ levels: LEVELS, onSelect: (i) => startLevel(i) });
 const rotator = createRotator({
   onRotate: (direction) => {
     if (selectedMirror) onRotate(selectedMirror, direction);
   },
-  onPreview: (direction) => session?.view.setRotatePreview(direction),
+  onPreview: (direction) => {
+    session?.view.setRotatePreview(direction);
+    updateGhostPreview(direction);
+  },
 });
+
+/** Ghost-trace the hovered rotation so the player sees where the beam would go. */
+function updateGhostPreview(direction: RotateDir | null): void {
+  if (!session) return;
+  if (!direction || !selectedMirror || session.state.won) {
+    session.beams.setPreview(null);
+    return;
+  }
+  const cur = session.state.orients.get(selectedMirror);
+  if (!cur) {
+    session.beams.setPreview(null);
+    return;
+  }
+  const hypo = new Map(session.state.orients);
+  hypo.set(selectedMirror, (direction === 1 ? MIRROR_CYCLE : MIRROR_CYCLE_REV)[cur]);
+  session.beams.setPreview(trace(session.level, hypo));
+}
+
+// Global music toggle + volume, floating over both the roadmap and the HUD.
+createAudioControl();
 
 function unloadLevel(): void {
   selectMirror(null);
@@ -77,8 +104,10 @@ function unloadLevel(): void {
 function startLevel(index: number): void {
   unloadLevel();
   const level = LEVELS[index]!;
+  const theme = themeForMission(index);
+  ctx.applyTheme(theme);
   const state = new GameState(level);
-  const view = new LevelView(level);
+  const view = new LevelView(level, theme);
   ctx.scene.add(view.group);
   const beams = new BeamRenderer(level);
   ctx.scene.add(beams.group);
@@ -87,6 +116,7 @@ function startLevel(index: number): void {
   for (const id of session.litNow) view.setTargetLit(id, true);
 
   hud.setLevel(index + 1, level.name, level.hint, level.parMoves);
+  hud.setUndoEnabled(false);
   hud.show();
   menu.hide();
   aimCameraForLevel(controls, ctx.camera, level);
@@ -96,6 +126,7 @@ function showMenu(): void {
   unloadLevel();
   hud.hideWin();
   hud.hide();
+  ctx.applyTheme(themeForMission(0));
   menu.refresh();
   menu.show();
   aimCameraForMenu(controls, ctx.camera);
@@ -126,6 +157,7 @@ function onRotate(entityId: string, direction: RotateDir = 1): void {
   if (!outcome) return;
   sfx.rotate(direction);
   hud.updateMoves(session.state.moves);
+  hud.setUndoEnabled(session.state.canUndo);
   session.view.rotateMirror(entityId, outcome.orient, direction);
   // Game logic runs on a timer, not the tween: rendering may be throttled
   // (background tab), and the win must still register.
@@ -133,6 +165,30 @@ function onRotate(entityId: string, direction: RotateDir = 1): void {
     applyTrace();
     if (outcome.justWon) beginWinSequence();
   }, 240);
+}
+
+function onUndo(): void {
+  if (!session) return;
+  const outcome = session.state.undo();
+  if (!outcome) return;
+  sfx.rotate(outcome.dir);
+  hud.updateMoves(session.state.moves);
+  hud.setUndoEnabled(session.state.canUndo);
+  session.view.rotateMirror(outcome.id, outcome.orient, outcome.dir);
+  window.setTimeout(() => applyTrace(), 240);
+}
+
+function onHint(): void {
+  if (!session || session.state.won) return;
+  const solution = session.level.solution;
+  if (!solution) return;
+  // Point at the first rotatable mirror that disagrees with the authored
+  // solution — one nudge per click, never the whole answer.
+  for (const [id, orient] of Object.entries(solution) as [string, MirrorOrient][]) {
+    if (session.state.orients.get(id) === orient) continue;
+    if (session.view.showHintGhost(id, orient)) sfx.hint();
+    return;
+  }
 }
 
 function beginWinSequence(): void {
@@ -163,10 +219,18 @@ function resetLevel(): void {
   }
   applyTrace();
   session.beams.reset();
+  session.beams.setPreview(null);
   controls.autoRotate = false;
   hud.updateMoves(0);
+  hud.setUndoEnabled(false);
   hud.hideWin();
 }
+
+window.addEventListener('keydown', (ev) => {
+  if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
+  if (ev.key === 'z' || ev.key === 'Z') onUndo();
+  if (ev.key === 'h' || ev.key === 'H') onHint();
+});
 
 setupPicking(ctx.renderer.domElement, ctx.camera, () => session?.view ?? null, (id) => {
   if (!session || session.state.won) return;
