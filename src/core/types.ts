@@ -33,7 +33,31 @@ export const COLOR_MASK: Record<BeamColor, number> = {
   white: 7, // red + green + blue
 };
 
-export type EntityType = 'emitter' | 'mirror' | 'target' | 'wall' | 'splitter' | 'portal';
+/**
+ * Reverse of COLOR_MASK: every non-zero RGB mask (1..7) names the color a
+ * filtered beam becomes. Used by filters (mask AND) to recolor the beam.
+ */
+export const MASK_COLOR: Record<number, BeamColor> = {
+  1: 'red',
+  2: 'green',
+  4: 'blue',
+  3: 'yellow',
+  5: 'magenta',
+  6: 'cyan',
+  7: 'white',
+};
+
+export type EntityType =
+  | 'emitter'
+  | 'mirror'
+  | 'target'
+  | 'wall'
+  | 'splitter'
+  | 'portal'
+  | 'filter'
+  | 'prism'
+  | 'oneway'
+  | 'gate';
 
 /**
  * Mirror orientation names the two open "ports" the reflective face connects.
@@ -59,20 +83,35 @@ export type MirrorOrient =
   | 'SD'
   | 'WD';
 
+/** A mirror rail: the mirror may slide one cell per move along `axis` within [min,max]. */
+export interface MirrorRail {
+  axis: 'x' | 'z';
+  min: number;
+  max: number;
+}
+
 export interface EntityDef {
   id: string;
   type: EntityType;
   pos: GridPos;
-  /** Emitters: beam direction. */
+  /** Emitters: beam direction. One-way gates: the single pass-through direction. */
   facing?: Dir;
   /** Mirrors: starting orientation. */
   orient?: MirrorOrient;
   /** Mirrors: player may rotate (locked mirrors are a mechanic in themselves). */
   rotatable?: boolean;
-  /** Emitters: beam color. Targets: required color (omit = any beam lights it). */
+  /** Emitters: beam color. Targets: required color (omit = any beam lights it). Filters: pass color. */
   color?: BeamColor;
   /** Portals: id of the twin portal this one connects to. */
   pairId?: string;
+  /** Mirrors: slide rail — the mirror can be dragged along an axis. */
+  rail?: MirrorRail;
+  /** Targets (switch crystals): id of a gate/emitter this target activates when lit. */
+  activates?: string;
+  /** Emitters: fires only once activated by a switch crystal. */
+  dormant?: boolean;
+  /** Targets (dark crystals): must receive NO beam; any hit fails the level. */
+  forbidden?: boolean;
 }
 
 export interface LevelDef {
@@ -87,4 +126,6 @@ export interface LevelDef {
   hint?: string;
   /** Known-good mirror orientations; verified against the tracer in dev builds. */
   solution?: Record<string, MirrorOrient>;
+  /** Known-good rail positions for movable mirrors; verified alongside `solution`. */
+  solutionPos?: Record<string, GridPos>;
 }

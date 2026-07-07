@@ -166,6 +166,11 @@ export const sfx = {
   blocked(): void {
     tone(110, 0.18, 'sawtooth', 0.35, 0, 70);
   },
+  /** Short soft whoosh for a rail slide. */
+  slide(): void {
+    tone(300, 0.14, 'sine', 0.3, 0, 460);
+    tone(150, 0.1, 'sine', 0.12);
+  },
   ignite(): void {
     tone(880, 0.35, 'sine', 0.5);
     tone(1318, 0.4, 'sine', 0.3, 0.03);

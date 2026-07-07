@@ -1,5 +1,6 @@
 import {
   COLOR_MASK,
+  MASK_COLOR,
   type BeamColor,
   type Dir,
   type EntityDef,
@@ -66,6 +67,20 @@ const SPLIT_DIRS: Record<Dir, [Dir, Dir] | null> = {
   D: null,
 };
 
+/**
+ * Prism splits by heading: [left, right] of the travel direction. Red exits
+ * straight, green exits left, blue exits right. Vertical beams have no
+ * horizontal left/right and are absorbed.
+ */
+const PRISM_LR: Record<Dir, [Dir, Dir] | null> = {
+  N: ['W', 'E'],
+  S: ['E', 'W'],
+  E: ['N', 'S'],
+  W: ['S', 'N'],
+  U: null,
+  D: null,
+};
+
 /** How far (in cells) a beam is drawn past the grid edge when it escapes. */
 const EXIT_OVERSHOOT = 2.5;
 
@@ -85,6 +100,10 @@ export interface TraceResult {
   segments: BeamSegment[];
   impacts: Impact[];
   litTargets: Set<string>;
+  /** Ids of gates/emitters currently activated by lit switch crystals. */
+  activated: Set<string>;
+  /** Ids of forbidden (dark) targets that received any beam (mask > 0). */
+  forbiddenHit: Set<string>;
   allLit: boolean;
 }
 
@@ -94,21 +113,26 @@ function outOfBounds(p: GridPos, size: LevelDef['gridSize']): boolean {
   return p.x < 0 || p.y < 0 || p.z < 0 || p.x >= size.x || p.y >= size.y || p.z >= size.z;
 }
 
-/**
- * Pure beam simulation: walks each emitter's beam cell-by-cell through the
- * grid and reports the straight segments to draw, the impact points where
- * beams are absorbed, and which targets are lit. Splitters push extra beams
- * onto the stack; portals teleport the walk; colors mix on targets via
- * COLOR_MASK unions.
- */
-export function trace(level: LevelDef, orients: ReadonlyMap<string, MirrorOrient>): TraceResult {
-  const byCell = new Map<string, EntityDef>();
-  const byId = new Map<string, EntityDef>();
-  for (const e of level.entities) {
-    byCell.set(key(e.pos), e);
-    byId.set(e.id, e);
-  }
+/** Per-run accumulation from one raw walk of the grid. */
+interface SimResult {
+  segments: BeamSegment[];
+  impacts: Impact[];
+  targetMask: Map<string, number>;
+}
 
+/**
+ * One raw beam walk with a fixed `activated` set. Gates in the set pass beams
+ * through; dormant emitters in the set fire. Splitters push extra beams;
+ * portals teleport; filters mask & pass; prisms split into RGB components;
+ * one-way gates admit only their facing direction; colors mix on targets.
+ */
+function simulate(
+  level: LevelDef,
+  orients: ReadonlyMap<string, MirrorOrient>,
+  byCell: ReadonlyMap<string, EntityDef>,
+  byId: ReadonlyMap<string, EntityDef>,
+  activated: ReadonlySet<string>,
+): SimResult {
   const segments: BeamSegment[] = [];
   const impacts: Impact[] = [];
   const targetMask = new Map<string, number>();
@@ -116,13 +140,14 @@ export function trace(level: LevelDef, orients: ReadonlyMap<string, MirrorOrient
 
   const stack: { pos: GridPos; dir: Dir; color: BeamColor }[] = [];
   for (const e of level.entities) {
-    if (e.type === 'emitter') stack.push({ pos: e.pos, dir: e.facing!, color: e.color ?? 'white' });
+    if (e.type !== 'emitter') continue;
+    if (e.dormant && !activated.has(e.id)) continue;
+    stack.push({ pos: e.pos, dir: e.facing!, color: e.color ?? 'white' });
   }
 
   while (stack.length > 0) {
     const beam = stack.pop()!;
-    let { pos, dir } = beam;
-    const beamColor = beam.color;
+    let { pos, dir, color: beamColor } = beam;
     let segStart: GridPos = { ...pos };
 
     walk: while (true) {
@@ -158,6 +183,17 @@ export function trace(level: LevelDef, orients: ReadonlyMap<string, MirrorOrient
       switch (ent.type) {
         case 'wall':
         case 'emitter': {
+          const end: GridPos = { x: next.x - v.x * 0.5, y: next.y - v.y * 0.5, z: next.z - v.z * 0.5 };
+          segments.push({ from: segStart, to: end, color: beamColor });
+          impacts.push({ pos: end, color: beamColor });
+          break walk;
+        }
+        case 'gate': {
+          // Closed gate = wall; open gate = empty space (no interaction).
+          if (activated.has(ent.id)) {
+            pos = next;
+            continue;
+          }
           const end: GridPos = { x: next.x - v.x * 0.5, y: next.y - v.y * 0.5, z: next.z - v.z * 0.5 };
           segments.push({ from: segStart, to: end, color: beamColor });
           impacts.push({ pos: end, color: beamColor });
@@ -203,6 +239,55 @@ export function trace(level: LevelDef, orients: ReadonlyMap<string, MirrorOrient
           segStart = { ...next };
           continue;
         }
+        case 'filter': {
+          // Pass straight through, ANDing the beam mask with the filter mask.
+          const outMask = COLOR_MASK[beamColor] & COLOR_MASK[ent.color!];
+          if (outMask === 0) {
+            // Nothing survives the filter — absorbed at the lens.
+            segments.push({ from: segStart, to: { ...next }, color: beamColor });
+            impacts.push({ pos: { ...next }, color: beamColor });
+            break walk;
+          }
+          segments.push({ from: segStart, to: { ...next }, color: beamColor });
+          beamColor = MASK_COLOR[outMask];
+          pos = next;
+          segStart = { ...next };
+          continue;
+        }
+        case 'prism': {
+          segments.push({ from: segStart, to: { ...next }, color: beamColor });
+          const lr = PRISM_LR[dir];
+          if (!lr) {
+            // Vertical beams have no horizontal split — absorbed.
+            impacts.push({ pos: { ...next }, color: beamColor });
+            break walk;
+          }
+          const [leftDir, rightDir] = lr;
+          const mask = COLOR_MASK[beamColor];
+          // Green component exits left, blue exits right, red continues straight.
+          if (mask & COLOR_MASK.green)
+            stack.push({ pos: { ...next }, dir: leftDir, color: 'green' });
+          if (mask & COLOR_MASK.blue)
+            stack.push({ pos: { ...next }, dir: rightDir, color: 'blue' });
+          if (mask & COLOR_MASK.red) {
+            beamColor = 'red';
+            pos = next;
+            segStart = { ...next };
+            continue;
+          }
+          break walk;
+        }
+        case 'oneway': {
+          // Passes only a beam travelling along `facing`; all else absorbed.
+          if (dir === ent.facing) {
+            pos = next;
+            continue;
+          }
+          const end: GridPos = { x: next.x - v.x * 0.4, y: next.y - v.y * 0.4, z: next.z - v.z * 0.4 };
+          segments.push({ from: segStart, to: end, color: beamColor });
+          impacts.push({ pos: end, color: beamColor });
+          break walk;
+        }
         case 'portal': {
           segments.push({ from: segStart, to: { ...next }, color: beamColor });
           const twin = ent.pairId ? byId.get(ent.pairId) : undefined;
@@ -219,19 +304,78 @@ export function trace(level: LevelDef, orients: ReadonlyMap<string, MirrorOrient
     }
   }
 
+  return { segments, impacts, targetMask };
+}
+
+/**
+ * Pure beam simulation. Walks each emitter's beam cell-by-cell and reports the
+ * straight segments to draw, the impact points where beams are absorbed, and
+ * which targets are lit.
+ *
+ * Runs a monotonic fixed-point loop for switch crystals: starting from an
+ * empty `activated` set, each pass adds the ids that lit switch crystals point
+ * at (`activates`), re-running until the set stops growing. Activation only
+ * ever grows, so the loop is deterministic and terminates (capped at 8 passes).
+ *
+ * `positions` overrides entity positions when building the cell map — used for
+ * mirrors sliding on rails.
+ */
+export function trace(
+  level: LevelDef,
+  orients: ReadonlyMap<string, MirrorOrient>,
+  positions?: ReadonlyMap<string, GridPos>,
+): TraceResult {
+  const byCell = new Map<string, EntityDef>();
+  const byId = new Map<string, EntityDef>();
+  for (const e of level.entities) {
+    const pos = positions?.get(e.id) ?? e.pos;
+    byCell.set(key(pos), e);
+    byId.set(e.id, e);
+  }
+
+  const activated = new Set<string>();
+  let sim = simulate(level, orients, byCell, byId, activated);
+  for (let iter = 0; iter < 8; iter++) {
+    let grew = false;
+    for (const e of level.entities) {
+      if (e.type !== 'target' || !e.activates || e.forbidden) continue;
+      const mask = sim.targetMask.get(e.id) ?? 0;
+      const lit = e.color ? mask === COLOR_MASK[e.color] : mask > 0;
+      if (lit && !activated.has(e.activates)) {
+        activated.add(e.activates);
+        grew = true;
+      }
+    }
+    if (!grew) break;
+    sim = simulate(level, orients, byCell, byId, activated);
+  }
+
   const litTargets = new Set<string>();
+  const forbiddenHit = new Set<string>();
   for (const e of level.entities) {
     if (e.type !== 'target') continue;
-    const mask = targetMask.get(e.id) ?? 0;
+    const mask = sim.targetMask.get(e.id) ?? 0;
+    if (e.forbidden) {
+      // Dark crystals must stay dark; they never count as lit.
+      if (mask > 0) forbiddenHit.add(e.id);
+      continue;
+    }
     const lit = e.color ? mask === COLOR_MASK[e.color] : mask > 0;
     if (lit) litTargets.add(e.id);
   }
 
-  const targets = level.entities.filter((e) => e.type === 'target');
+  const targets = level.entities.filter((e) => e.type === 'target' && !e.forbidden);
+  const allLit =
+    targets.length > 0 &&
+    targets.every((t) => litTargets.has(t.id)) &&
+    forbiddenHit.size === 0;
+
   return {
-    segments,
-    impacts,
+    segments: sim.segments,
+    impacts: sim.impacts,
     litTargets,
-    allLit: targets.length > 0 && targets.every((t) => litTargets.has(t.id)),
+    activated,
+    forbiddenHit,
+    allLit,
   };
 }

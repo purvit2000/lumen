@@ -65,11 +65,39 @@ const VOID: WorldTheme = {
   nebulae: [0x3a1b5e, 0x1b2a5e, 0x4e1b3e],
 };
 
-export const WORLD_THEMES: WorldTheme[] = [STEEL, EMBER, VOID];
+const JADE: WorldTheme = {
+  id: 'jade',
+  name: 'Jade Expanse',
+  tilePlate: '#254036',
+  wallPlate: '#20382f',
+  glowRGB: '120,255,190',
+  traceRGB: '130,255,200',
+  accent: 0x5cffb0,
+  tileTint: 0xa8d4bc,
+  edge: 0x74ffc2,
+  nebulae: [0x14503a, 0x1b2a5e, 0x0e3c2a],
+};
 
-/** Act boundaries: missions 1–4 steel, 5–8 ember, 9–13 void. */
+const CRIMSON: WorldTheme = {
+  id: 'crimson',
+  name: 'Crimson Reach',
+  tilePlate: '#46262c',
+  wallPlate: '#3c2026',
+  glowRGB: '255,130,160',
+  traceRGB: '255,145,170',
+  accent: 0xff5f9e,
+  tileTint: 0xdba8b0,
+  edge: 0xff8ba0,
+  nebulae: [0x5e1b2a, 0x4e1b3e, 0x2b1b4e],
+};
+
+export const WORLD_THEMES: WorldTheme[] = [STEEL, EMBER, VOID, JADE, CRIMSON];
+
+/** Act boundaries: 1–4 steel, 5–8 ember, 9–13 void, 14–19 jade, 20+ crimson. */
 export function themeForMission(index: number): WorldTheme {
   if (index < 4) return STEEL;
   if (index < 8) return EMBER;
-  return VOID;
+  if (index < 13) return VOID;
+  if (index < 19) return JADE;
+  return CRIMSON;
 }

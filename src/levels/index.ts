@@ -12,6 +12,18 @@ import { level10 } from './level10';
 import { level11 } from './level11';
 import { level12 } from './level12';
 import { level13 } from './level13';
+import { level14 } from './level14';
+import { level15 } from './level15';
+import { level16 } from './level16';
+import { level17 } from './level17';
+import { level18 } from './level18';
+import { level19 } from './level19';
+import { level20 } from './level20';
+import { level21 } from './level21';
+import { level22 } from './level22';
+import { level23 } from './level23';
+import { level24 } from './level24';
+import { level25 } from './level25';
 
 /** Adding a level = add its file and list it here. */
 export const LEVELS: LevelDef[] = [
@@ -28,6 +40,18 @@ export const LEVELS: LevelDef[] = [
   level11,
   level12,
   level13,
+  level14,
+  level15,
+  level16,
+  level17,
+  level18,
+  level19,
+  level20,
+  level21,
+  level22,
+  level23,
+  level24,
+  level25,
 ];
 
 export function getLevel(index: number): LevelDef | undefined {

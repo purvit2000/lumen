@@ -612,6 +612,25 @@ h1 {
   transform: rotate(-150deg);
 }
 
+/* Violet = rail slide, distinct from the teal/amber rotation coding. */
+.rot-btn.slide {
+  color: #b583ff;
+  border-color: rgba(181, 131, 255, 0.55);
+}
+
+.rot-btn.slide:hover {
+  background: rgba(181, 131, 255, 0.22);
+  box-shadow: 0 0 18px rgba(181, 131, 255, 0.6);
+}
+
+.rot-btn.slide.back:hover .rot-glyph {
+  transform: translateX(-3px);
+}
+
+.rot-btn.slide.fwd:hover .rot-glyph {
+  transform: translateX(3px);
+}
+
 .rot-btn:active {
   transform: scale(0.9);
 }

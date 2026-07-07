@@ -55,7 +55,33 @@ interface MirrorView {
   faceMat: THREE.MeshStandardMaterial;
   frameMat: THREE.MeshStandardMaterial;
   rotatable: boolean;
+  movable: boolean;
 }
+
+interface GateView {
+  frameMat: THREE.MeshStandardMaterial;
+  planeMat: THREE.MeshBasicMaterial;
+  open: boolean;
+}
+
+interface EmitterView {
+  tip: THREE.Mesh;
+  tipMat: THREE.MeshBasicMaterial;
+  bodyMat: THREE.MeshStandardMaterial;
+  light: THREE.PointLight;
+  colorHex: number;
+  active: boolean;
+}
+
+interface ForbiddenView {
+  halo: THREE.Mesh;
+  haloMat: THREE.MeshBasicMaterial;
+  light: THREE.PointLight;
+  hit: boolean;
+}
+
+/** Distinct lime tint for switch crystals and their linked device beacons. */
+const SWITCH_HEX = 0x9dff57;
 
 export class LevelView {
   readonly group = new THREE.Group();
@@ -64,9 +90,14 @@ export class LevelView {
 
   private readonly targets = new Map<string, TargetView>();
   private readonly mirrors = new Map<string, MirrorView>();
+  private readonly gates = new Map<string, GateView>();
+  private readonly emitters = new Map<string, EmitterView>();
+  private readonly forbidden = new Map<string, ForbiddenView>();
   private readonly tiles: { mesh: THREE.Mesh; phase: number; baseY: number }[] = [];
   private readonly emitterTips: THREE.Mesh[] = [];
   private readonly spinners: { mesh: THREE.Object3D; speed: number; axis: 'x' | 'y' }[] = [];
+  /** Additive arrowheads inside one-way gates that drift along the pass dir. */
+  private readonly arrowStreams: { meshes: THREE.Mesh[]; dir: Dir; base: number }[] = [];
   private hoveredId: string | null = null;
   private selectedId: string | null = null;
 
@@ -266,6 +297,18 @@ export class LevelView {
       case 'portal':
         this.buildPortal(e);
         break;
+      case 'filter':
+        this.buildFilter(e);
+        break;
+      case 'prism':
+        this.buildPrism(e);
+        break;
+      case 'oneway':
+        this.buildOneway(e);
+        break;
+      case 'gate':
+        this.buildGate(e);
+        break;
     }
   }
 
@@ -273,21 +316,20 @@ export class LevelView {
     const root = new THREE.Group();
     root.rotation.y = FACING_ANGLE[e.facing ?? 'E'];
 
+    const dormant = e.dormant === true;
     const colorHex = COLOR_HEX[e.color ?? 'white'];
     const metal = metalTextures();
-    const body = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.3, 0.38, 0.55, 8),
-      new THREE.MeshStandardMaterial({
-        map: metal.map,
-        bumpMap: metal.bumpMap,
-        bumpScale: 0.5,
-        color: 0x3a4664,
-        roughness: 0.4,
-        metalness: 0.85,
-        emissive: colorHex,
-        emissiveIntensity: 0.12,
-      }),
-    );
+    const bodyMat = new THREE.MeshStandardMaterial({
+      map: metal.map,
+      bumpMap: metal.bumpMap,
+      bumpScale: 0.5,
+      color: 0x3a4664,
+      roughness: 0.4,
+      metalness: 0.85,
+      emissive: colorHex,
+      emissiveIntensity: dormant ? 0.03 : 0.12,
+    });
+    const body = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.38, 0.55, 8), bodyMat);
     body.position.y = 0.28;
     root.add(body);
 
@@ -307,19 +349,51 @@ export class LevelView {
     barrel.position.set(0, 0.5, 0.3);
     root.add(barrel);
 
-    const tip = new THREE.Mesh(
-      new THREE.SphereGeometry(0.09, 16, 16),
-      new THREE.MeshBasicMaterial({ color: colorHex, toneMapped: false }),
-    );
+    const tipMat = new THREE.MeshBasicMaterial({ color: colorHex, toneMapped: false });
+    tipMat.opacity = dormant ? 0.15 : 1;
+    tipMat.transparent = dormant;
+    const tip = new THREE.Mesh(new THREE.SphereGeometry(0.09, 16, 16), tipMat);
     tip.position.set(0, 0.5, 0.55);
     root.add(tip);
-    this.emitterTips.push(tip);
+    // Only lit tips pulse; dormant ones stay dark until activated.
+    if (!dormant) this.emitterTips.push(tip);
 
-    const glow = new THREE.PointLight(colorHex, 2.2, 4);
+    const glow = new THREE.PointLight(colorHex, dormant ? 0 : 2.2, 4);
     glow.position.copy(tip.position);
     root.add(glow);
 
+    if (dormant) {
+      // A lime beacon so it pairs visually with the switch crystal that wakes it.
+      root.add(this.beacon());
+      this.emitters.set(e.id, {
+        tip,
+        tipMat,
+        bodyMat,
+        light: glow,
+        colorHex,
+        active: false,
+      });
+    }
+
     this.placeRoot(root, e);
+  }
+
+  /** Small glowing lime antenna marking a switch/linked-device pairing. */
+  private beacon(): THREE.Group {
+    const g = new THREE.Group();
+    const stalk = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.012, 0.012, 0.16, 6),
+      new THREE.MeshBasicMaterial({ color: SWITCH_HEX, transparent: true, opacity: 0.7, toneMapped: false }),
+    );
+    stalk.position.y = 0.62;
+    g.add(stalk);
+    const bulb = new THREE.Mesh(
+      new THREE.SphereGeometry(0.035, 10, 10),
+      new THREE.MeshBasicMaterial({ color: SWITCH_HEX, toneMapped: false }),
+    );
+    bulb.position.y = 0.7;
+    g.add(bulb);
+    return g;
   }
 
   private buildWall(e: EntityDef): void {
@@ -351,6 +425,10 @@ export class LevelView {
   }
 
   private buildTarget(e: EntityDef): void {
+    if (e.forbidden) {
+      this.buildForbidden(e);
+      return;
+    }
     const root = new THREE.Group();
     const colorHex = COLOR_HEX[e.color ?? 'white'];
     const pedestal = this.pedestal(colorHex);
@@ -398,6 +476,9 @@ export class LevelView {
     const light = new THREE.PointLight(colorHex, 0, 5);
     light.position.y = 0.6;
     root.add(light);
+
+    // Switch crystals carry a lime beacon matching their linked device.
+    if (e.activates) root.add(this.beacon());
 
     this.placeRoot(root, e);
     this.targets.set(e.id, {
@@ -506,6 +587,224 @@ export class LevelView {
     this.placeRoot(root, e);
   }
 
+  // ---------- filter ----------
+
+  private buildFilter(e: EntityDef): void {
+    const root = new THREE.Group();
+    const colorHex = COLOR_HEX[e.color ?? 'white'];
+    root.add(this.pedestal(colorHex));
+
+    // Metal lens ring holding a translucent colored disc the beam passes through.
+    const ring = new THREE.Mesh(
+      new THREE.TorusGeometry(0.26, 0.035, 12, 32),
+      new THREE.MeshStandardMaterial({
+        color: 0x51607f,
+        roughness: 0.3,
+        metalness: 0.95,
+        emissive: colorHex,
+        emissiveIntensity: 0.2,
+      }),
+    );
+    ring.position.y = 0.5;
+    root.add(ring);
+
+    const disc = new THREE.Mesh(
+      new THREE.CircleGeometry(0.25, 32),
+      new THREE.MeshStandardMaterial({
+        color: colorHex,
+        emissive: colorHex,
+        emissiveIntensity: 0.5,
+        roughness: 0.1,
+        metalness: 0.1,
+        transparent: true,
+        opacity: 0.55,
+        side: THREE.DoubleSide,
+      }),
+    );
+    disc.position.y = 0.5;
+    root.add(disc);
+    this.spinners.push({ mesh: ring, speed: 0.4, axis: 'y' });
+
+    this.placeRoot(root, e);
+  }
+
+  // ---------- prism ----------
+
+  private buildPrism(e: EntityDef): void {
+    const root = new THREE.Group();
+    root.add(this.pedestal(0xdfefff));
+
+    const prism = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.24, 0.24, 0.5, 3),
+      new THREE.MeshStandardMaterial({
+        color: 0xf2f6ff,
+        emissive: 0xbfe9ff,
+        emissiveIntensity: 0.25,
+        roughness: 0.05,
+        metalness: 0.2,
+        transparent: true,
+        opacity: 0.92,
+      }),
+    );
+    prism.position.y = 0.5;
+    root.add(prism);
+    this.spinners.push({ mesh: prism, speed: 0.6, axis: 'y' });
+
+    // Three studs on the collar hint at the red/green/blue split.
+    const studColors = [COLOR_HEX.red, COLOR_HEX.green, COLOR_HEX.blue];
+    studColors.forEach((c, i) => {
+      const a = (i / 3) * Math.PI * 2;
+      const stud = new THREE.Mesh(
+        new THREE.SphereGeometry(0.03, 10, 10),
+        new THREE.MeshBasicMaterial({ color: c, toneMapped: false }),
+      );
+      stud.position.set(Math.cos(a) * 0.22, 0.26, Math.sin(a) * 0.22);
+      root.add(stud);
+    });
+
+    this.placeRoot(root, e);
+  }
+
+  // ---------- one-way gate ----------
+
+  private buildOneway(e: EntityDef): void {
+    const root = new THREE.Group();
+    const facing = e.facing ?? 'E';
+    // Opening faces along `facing`: the arch's local +Z points that way.
+    root.rotation.y = FACING_ANGLE[facing];
+    const metal = metalTextures();
+    const pillarMat = new THREE.MeshStandardMaterial({
+      map: metal.map,
+      bumpMap: metal.bumpMap,
+      bumpScale: 0.4,
+      color: 0x515f80,
+      roughness: 0.3,
+      metalness: 0.95,
+      emissive: 0x2ae6ff,
+      emissiveIntensity: 0.1,
+    });
+    const pillarGeo = new THREE.BoxGeometry(0.12, 0.9, 0.12);
+    for (const sx of [-0.3, 0.3]) {
+      const pillar = new THREE.Mesh(pillarGeo, pillarMat);
+      pillar.position.set(sx, 0.45, 0);
+      root.add(pillar);
+    }
+    const bar = new THREE.Mesh(new THREE.BoxGeometry(0.72, 0.12, 0.12), pillarMat);
+    bar.position.set(0, 0.9, 0);
+    root.add(bar);
+
+    // Additive arrowheads pointing along +Z (i.e. `facing`), drifting/looping.
+    const arrows: THREE.Mesh[] = [];
+    const arrowGeo = new THREE.ConeGeometry(0.06, 0.16, 12);
+    for (let i = 0; i < 3; i++) {
+      const mat = new THREE.MeshBasicMaterial({
+        color: 0x2ae6ff,
+        transparent: true,
+        opacity: 0.7,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        toneMapped: false,
+      });
+      const arrow = new THREE.Mesh(arrowGeo, mat);
+      arrow.rotation.x = Math.PI / 2; // cone tip toward +Z
+      arrow.position.set(0, 0.5, 0);
+      root.add(arrow);
+      arrows.push(arrow);
+    }
+    // Stream drifts in local +Z, which the tracer treats as `facing`.
+    this.arrowStreams.push({ meshes: arrows, dir: 'S', base: 0 });
+
+    this.placeRoot(root, e);
+  }
+
+  // ---------- gate ----------
+
+  private buildGate(e: EntityDef): void {
+    const root = new THREE.Group();
+    const frameMat = new THREE.MeshStandardMaterial({
+      color: 0x1a1220,
+      roughness: 0.5,
+      metalness: 0.7,
+      emissive: 0xff5522,
+      emissiveIntensity: 0.5,
+    });
+    const frame = new THREE.Mesh(new THREE.BoxGeometry(0.82, 1.05, 0.14), frameMat);
+    frame.position.y = 0.55;
+    root.add(frame);
+
+    // Inner translucent energy plane: bright amber-red closed, near-gone open.
+    const planeMat = new THREE.MeshBasicMaterial({
+      color: 0xff6633,
+      transparent: true,
+      opacity: 0.5,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      toneMapped: false,
+      side: THREE.DoubleSide,
+    });
+    const plane = new THREE.Mesh(new THREE.PlaneGeometry(0.66, 0.9), planeMat);
+    plane.position.y = 0.55;
+    plane.position.z = 0.075;
+    root.add(plane);
+    const planeBack = new THREE.Mesh(new THREE.PlaneGeometry(0.66, 0.9), planeMat);
+    planeBack.position.y = 0.55;
+    planeBack.position.z = -0.075;
+    root.add(planeBack);
+
+    this.placeRoot(root, e);
+    this.gates.set(e.id, { frameMat, planeMat, open: false });
+  }
+
+  // ---------- dark (forbidden) crystal ----------
+
+  private buildForbidden(e: EntityDef): void {
+    const root = new THREE.Group();
+    root.add(this.pedestal(0x330000));
+
+    const crystal = new THREE.Mesh(
+      new THREE.OctahedronGeometry(0.3, 0),
+      new THREE.MeshStandardMaterial({
+        color: 0x0a0406,
+        emissive: 0xff2233,
+        emissiveIntensity: 0.35,
+        roughness: 0.15,
+        metalness: 0.3,
+        flatShading: true,
+      }),
+    );
+    crystal.position.y = 0.5;
+    crystal.scale.y = 1.45;
+    root.add(crystal);
+
+    const collar = new THREE.Mesh(
+      new THREE.TorusGeometry(0.2, 0.02, 8, 24),
+      new THREE.MeshBasicMaterial({ color: 0xff2233, transparent: true, opacity: 0.7, toneMapped: false }),
+    );
+    collar.position.y = 0.26;
+    collar.rotation.x = Math.PI / 2;
+    root.add(collar);
+
+    const haloMat = new THREE.MeshBasicMaterial({
+      color: 0xff2233,
+      transparent: true,
+      opacity: 0,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      toneMapped: false,
+      side: THREE.DoubleSide,
+    });
+    const halo = new THREE.Mesh(new THREE.SphereGeometry(0.44, 20, 20), haloMat);
+    halo.position.y = 0.5;
+    root.add(halo);
+
+    const light = new THREE.PointLight(0xff2233, 0, 5);
+    light.position.y = 0.55;
+    root.add(light);
+
+    this.placeRoot(root, e);
+    this.forbidden.set(e.id, { halo, haloMat, light, hit: false });
+  }
+
   private buildMirror(e: EntityDef): void {
     const root = new THREE.Group();
     root.userData.entityId = e.id;
@@ -597,8 +896,62 @@ export class LevelView {
     root.add(panel);
 
     this.placeRoot(root, e);
-    if (!locked) this.pickables.push(root);
-    this.mirrors.set(e.id, { root, panel, faceMat, frameMat, rotatable: !locked });
+    const movable = e.rail !== undefined;
+    if (!locked || movable) this.pickables.push(root);
+    if (movable) this.buildRail(root, e);
+    this.mirrors.set(e.id, { root, panel, faceMat, frameMat, rotatable: !locked, movable });
+  }
+
+  /** A subtle glowing track along a mirror's rail, with a stud at each cell. */
+  private buildRail(root: THREE.Group, e: EntityDef): void {
+    const rail = e.rail!;
+    const span = rail.max - rail.min;
+    // Track strip lies flat on the floor, spanning the full rail length.
+    const length = span + 0.55;
+    const stripGeo =
+      rail.axis === 'x'
+        ? new THREE.PlaneGeometry(length, 0.12)
+        : new THREE.PlaneGeometry(0.12, length);
+    const strip = new THREE.Mesh(
+      stripGeo,
+      new THREE.MeshBasicMaterial({
+        color: 0xb583ff,
+        transparent: true,
+        opacity: 0.28,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        toneMapped: false,
+      }),
+    );
+    strip.rotation.x = -Math.PI / 2;
+    // Center of the rail relative to the mirror's own cell (local space).
+    const mid = (rail.min + rail.max) / 2;
+    const cur = e.pos[rail.axis];
+    strip.position.set(
+      rail.axis === 'x' ? mid - cur : 0,
+      0.015,
+      rail.axis === 'z' ? mid - cur : 0,
+    );
+    root.add(strip);
+
+    const studGeo = new THREE.CylinderGeometry(0.05, 0.05, 0.03, 12);
+    const studMat = new THREE.MeshBasicMaterial({
+      color: 0xb583ff,
+      transparent: true,
+      opacity: 0.6,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      toneMapped: false,
+    });
+    for (let c = rail.min; c <= rail.max; c++) {
+      const stud = new THREE.Mesh(studGeo, studMat);
+      stud.position.set(
+        rail.axis === 'x' ? c - cur : 0,
+        0.02,
+        rail.axis === 'z' ? c - cur : 0,
+      );
+      root.add(stud);
+    }
   }
 
   // ---------- rotation gizmo ----------
@@ -684,6 +1037,36 @@ export class LevelView {
     m.panel.quaternion.copy(orientQuat(orient));
   }
 
+  /** Tween a rail mirror's root to a new grid cell (~200ms). */
+  moveMirror(id: string, pos: GridPos): void {
+    const m = this.mirrors.get(id);
+    if (!m) return;
+    const w = gridToWorld(pos, this.level.gridSize);
+    const to = new THREE.Vector3(w.x, pos.y, w.z);
+    const from = m.root.position.clone();
+    tween(200, (t) => {
+      m.root.position.lerpVectors(from, to, t);
+    });
+  }
+
+  /** Snap a rail mirror's root to a grid cell (no tween), for reset. */
+  snapMirrorPos(id: string, pos: GridPos): void {
+    const m = this.mirrors.get(id);
+    if (!m) return;
+    const w = gridToWorld(pos, this.level.gridSize);
+    m.root.position.set(w.x, pos.y, w.z);
+  }
+
+  /** Whether a mirror is a rail mirror (used to decide the slide control). */
+  isMirrorMovable(id: string): boolean {
+    return this.mirrors.get(id)?.movable ?? false;
+  }
+
+  /** Whether a mirror can rotate (used to decide the rotation control). */
+  isMirrorRotatable(id: string): boolean {
+    return this.mirrors.get(id)?.rotatable ?? false;
+  }
+
   setTargetLit(id: string, lit: boolean): void {
     const t = this.targets.get(id);
     if (!t || t.lit === lit) return;
@@ -706,6 +1089,62 @@ export class LevelView {
         t.crystal.scale.set(s, 1.45 * s, s);
       });
     }
+  }
+
+  /** Open/close a gate: cool the frame and fade the barrier plane when open. */
+  setGateOpen(id: string, open: boolean): void {
+    const g = this.gates.get(id);
+    if (!g || g.open === open) return;
+    g.open = open;
+    const fromOp = g.planeMat.opacity;
+    const toOp = open ? 0.04 : 0.5;
+    const fromEm = g.frameMat.emissiveIntensity;
+    const toEm = open ? 0.08 : 0.5;
+    tween(300, (k) => {
+      g.planeMat.opacity = THREE.MathUtils.lerp(fromOp, toOp, k);
+      g.frameMat.emissiveIntensity = THREE.MathUtils.lerp(fromEm, toEm, k);
+    });
+  }
+
+  /** Wake or sleep a dormant emitter: ramp tip glow, light and body emissive. */
+  setEmitterActive(id: string, active: boolean): void {
+    const em = this.emitters.get(id);
+    if (!em || em.active === active) return;
+    em.active = active;
+    // Once awake, join the pulsing-tip loop; sleeping ones drop out.
+    if (active && !this.emitterTips.includes(em.tip)) this.emitterTips.push(em.tip);
+    if (!active) {
+      const i = this.emitterTips.indexOf(em.tip);
+      if (i >= 0) this.emitterTips.splice(i, 1);
+      em.tip.scale.setScalar(1);
+    }
+    const fromOp = em.tipMat.opacity;
+    const toOp = active ? 1 : 0.15;
+    const fromLight = em.light.intensity;
+    const toLight = active ? 2.2 : 0;
+    const fromEm = em.bodyMat.emissiveIntensity;
+    const toEm = active ? 0.12 : 0.03;
+    em.tipMat.transparent = true;
+    tween(320, (k) => {
+      em.tipMat.opacity = THREE.MathUtils.lerp(fromOp, toOp, k);
+      em.light.intensity = THREE.MathUtils.lerp(fromLight, toLight, k);
+      em.bodyMat.emissiveIntensity = THREE.MathUtils.lerp(fromEm, toEm, k);
+    });
+  }
+
+  /** A forbidden crystal flares angry red when hit, cools when clear. */
+  setForbiddenHit(id: string, hit: boolean): void {
+    const f = this.forbidden.get(id);
+    if (!f || f.hit === hit) return;
+    f.hit = hit;
+    const fromHalo = f.haloMat.opacity;
+    const toHalo = hit ? 0.5 : 0;
+    const fromLight = f.light.intensity;
+    const toLight = hit ? 4 : 0;
+    tween(hit ? 220 : 320, (k) => {
+      f.haloMat.opacity = THREE.MathUtils.lerp(fromHalo, toHalo, k);
+      f.light.intensity = THREE.MathUtils.lerp(fromLight, toLight, k);
+    });
   }
 
   setHovered(id: string | null): void {
@@ -741,7 +1180,24 @@ export class LevelView {
   showHintGhost(id: string, orient: MirrorOrient): boolean {
     const m = this.mirrors.get(id);
     if (!m || !m.rotatable) return false;
+    const at = m.root.position.clone().add(new THREE.Vector3(0, 0.62, 0));
+    return this.pulseHintGhost(m, at, orientQuat(orient));
+  }
 
+  /**
+   * Position hint: a translucent gold panel at the mirror's *solved* rail cell,
+   * pulsing the mirror's frame so the player sees where to slide it.
+   */
+  showPosHintGhost(id: string, pos: GridPos): boolean {
+    const m = this.mirrors.get(id);
+    if (!m || !m.movable) return false;
+    const w = gridToWorld(pos, this.level.gridSize);
+    const at = new THREE.Vector3(w.x, pos.y + 0.62, w.z);
+    // Face the ghost the same way as the mirror's current panel.
+    return this.pulseHintGhost(m, at, m.panel.quaternion.clone());
+  }
+
+  private pulseHintGhost(m: MirrorView, at: THREE.Vector3, quat: THREE.Quaternion): boolean {
     if (this.hintGhost) {
       this.group.remove(this.hintGhost);
       this.hintGhost.geometry.dispose();
@@ -759,8 +1215,8 @@ export class LevelView {
       toneMapped: false,
     });
     const ghost = new THREE.Mesh(new THREE.PlaneGeometry(0.68, 0.76), mat);
-    ghost.position.copy(m.root.position).add(new THREE.Vector3(0, 0.62, 0));
-    ghost.quaternion.copy(orientQuat(orient));
+    ghost.position.copy(at);
+    ghost.quaternion.copy(quat);
     this.group.add(ghost);
     this.hintGhost = ghost;
 
@@ -837,11 +1293,38 @@ export class LevelView {
       const s = 1 + Math.sin(time * 5) * 0.12;
       tip.scale.setScalar(s);
     }
+    // One-way arrowheads drift along +Z and loop, fading at the ends.
+    for (const stream of this.arrowStreams) {
+      stream.meshes.forEach((arrow, i) => {
+        const phase = (time * 0.9 + i / stream.meshes.length) % 1;
+        const z = -0.3 + phase * 0.6;
+        arrow.position.z = z;
+        const mat = arrow.material as THREE.MeshBasicMaterial;
+        mat.opacity = Math.sin(phase * Math.PI) * 0.75;
+      });
+    }
+    // Forbidden crystals that are hit throb an angry red halo.
+    for (const f of this.forbidden.values()) {
+      if (!f.hit) continue;
+      const pulse = 0.5 + Math.sin(time * 6) * 0.25;
+      f.haloMat.opacity = Math.max(0, pulse);
+    }
     this.updateGizmo(time, dt);
   }
 
   private updateGizmo(time: number, dt: number): void {
     if (!this.gizmo.visible) return;
+    // Follow the selected mirror in case it slid along a rail.
+    if (this.selectedId) {
+      const m = this.mirrors.get(this.selectedId);
+      if (m) {
+        this.gizmo.position.set(
+          m.root.position.x,
+          m.root.position.y + 0.62,
+          m.root.position.z,
+        );
+      }
+    }
     const spinning = performance.now() < this.spinUntil;
     // Active direction: the executing spin wins, else the hovered preview.
     const active: -1 | 1 | null = spinning ? this.spinDir : this.previewDir;

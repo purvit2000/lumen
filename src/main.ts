@@ -14,8 +14,8 @@ import { setupPicking } from './input/picking';
 import { createAudioControl } from './ui/audioControl';
 import { createHud } from './ui/hud';
 import { createMenu } from './ui/menu';
-import { createRotator } from './ui/rotator';
-import type { LevelDef, MirrorOrient } from './core/types';
+import { createRotator, type SlideStep } from './ui/rotator';
+import type { GridPos, LevelDef, MirrorOrient } from './core/types';
 
 // Dev sanity check: every level's authored solution must actually solve it.
 if (import.meta.env.DEV) {
@@ -24,7 +24,15 @@ if (import.meta.env.DEV) {
       console.warn(`[lumen] Level "${lvl.id}" has no solution to verify.`);
       continue;
     }
-    const res = trace(lvl, new Map(Object.entries(lvl.solution) as [string, MirrorOrient][]));
+    // Movable mirrors solve at their `solutionPos`; unset ones stay at pos.
+    const orients = new Map(Object.entries(lvl.solution) as [string, MirrorOrient][]);
+    const positions = new Map<string, GridPos>();
+    for (const e of lvl.entities) {
+      if (e.type === 'mirror' && e.rail) {
+        positions.set(e.id, lvl.solutionPos?.[e.id] ?? e.pos);
+      }
+    }
+    const res = trace(lvl, orients, positions);
     if (!res.allLit) {
       console.error(`[lumen] Level "${lvl.id}" solution FAILS — lit only:`, [...res.litTargets]);
     } else {
@@ -44,6 +52,7 @@ interface Session {
   view: LevelView;
   beams: BeamRenderer;
   litNow: Set<string>;
+  forbiddenNow: Set<string>;
 }
 
 let session: Session | null = null;
@@ -71,6 +80,10 @@ const rotator = createRotator({
     session?.view.setRotatePreview(direction);
     updateGhostPreview(direction);
   },
+  onSlide: (step) => {
+    if (selectedMirror) onSlide(selectedMirror, step);
+  },
+  onSlidePreview: (step) => updateSlideGhost(step),
 });
 
 /** Ghost-trace the hovered rotation so the player sees where the beam would go. */
@@ -87,7 +100,39 @@ function updateGhostPreview(direction: RotateDir | null): void {
   }
   const hypo = new Map(session.state.orients);
   hypo.set(selectedMirror, (direction === 1 ? MIRROR_CYCLE : MIRROR_CYCLE_REV)[cur]);
-  session.beams.setPreview(trace(session.level, hypo));
+  session.beams.setPreview(trace(session.level, hypo, session.state.positions));
+}
+
+/** Ghost-trace the hovered slide with a hypothetical positions map. */
+function updateSlideGhost(step: SlideStep | null): void {
+  if (!session) return;
+  if (!step || !selectedMirror || session.state.won) {
+    session.beams.setPreview(null);
+    return;
+  }
+  const e = session.level.entities.find((x) => x.id === selectedMirror);
+  if (!e || !e.rail) {
+    session.beams.setPreview(null);
+    return;
+  }
+  const cur = session.state.positions.get(selectedMirror);
+  if (!cur) {
+    session.beams.setPreview(null);
+    return;
+  }
+  const target: GridPos = {
+    x: cur.x + (e.rail.axis === 'x' ? step : 0),
+    y: cur.y,
+    z: cur.z + (e.rail.axis === 'z' ? step : 0),
+  };
+  const coord = e.rail.axis === 'x' ? target.x : target.z;
+  if (coord < e.rail.min || coord > e.rail.max) {
+    session.beams.setPreview(null);
+    return;
+  }
+  const hypo = new Map(session.state.positions);
+  hypo.set(selectedMirror, target);
+  session.beams.setPreview(trace(session.level, session.state.orients, hypo));
 }
 
 // Global music toggle + volume, floating over both the roadmap and the HUD.
@@ -112,8 +157,22 @@ function startLevel(index: number): void {
   const beams = new BeamRenderer(level);
   ctx.scene.add(beams.group);
   beams.setTrace(state.trace);
-  session = { index, level, state, view, beams, litNow: new Set(state.trace.litTargets) };
+  session = {
+    index,
+    level,
+    state,
+    view,
+    beams,
+    litNow: new Set(state.trace.litTargets),
+    forbiddenNow: new Set(state.trace.forbiddenHit),
+  };
   for (const id of session.litNow) view.setTargetLit(id, true);
+  // Apply any activation/forbidden state present in the starting trace.
+  for (const e of level.entities) {
+    if (e.type === 'gate') view.setGateOpen(e.id, state.trace.activated.has(e.id));
+    if (e.type === 'emitter' && e.dormant) view.setEmitterActive(e.id, state.trace.activated.has(e.id));
+    if (e.type === 'target' && e.forbidden) view.setForbiddenHit(e.id, state.trace.forbiddenHit.has(e.id));
+  }
 
   hud.setLevel(index + 1, level.name, level.hint, level.parMoves);
   hud.setUndoEnabled(false);
@@ -140,7 +199,7 @@ function applyTrace(): void {
 
   let anyIgnited = false;
   for (const e of level.entities) {
-    if (e.type !== 'target') continue;
+    if (e.type !== 'target' || e.forbidden) continue;
     const isLit = result.litTargets.has(e.id);
     const wasLit = session.litNow.has(e.id);
     view.setTargetLit(e.id, isLit);
@@ -149,6 +208,23 @@ function applyTrace(): void {
   }
   if (anyIgnited) sfx.ignite();
   session.litNow = new Set(result.litTargets);
+
+  // Switch-driven state: open gates, wake dormant emitters, and flare any
+  // forbidden crystal a beam newly touched.
+  for (const e of level.entities) {
+    if (e.type === 'gate') view.setGateOpen(e.id, result.activated.has(e.id));
+    if (e.type === 'emitter' && e.dormant) view.setEmitterActive(e.id, result.activated.has(e.id));
+  }
+  let anyForbidden = false;
+  for (const e of level.entities) {
+    if (e.type !== 'target' || !e.forbidden) continue;
+    const hit = result.forbiddenHit.has(e.id);
+    const wasHit = session.forbiddenNow.has(e.id);
+    view.setForbiddenHit(e.id, hit);
+    if (hit && !wasHit) anyForbidden = true;
+  }
+  if (anyForbidden) sfx.blocked();
+  session.forbiddenNow = new Set(result.forbiddenHit);
 }
 
 function onRotate(entityId: string, direction: RotateDir = 1): void {
@@ -167,14 +243,37 @@ function onRotate(entityId: string, direction: RotateDir = 1): void {
   }, 240);
 }
 
+function onSlide(entityId: string, step: SlideStep): void {
+  if (!session) return;
+  const outcome = session.state.moveMirror(entityId, step);
+  if (!outcome) {
+    sfx.blocked();
+    return;
+  }
+  sfx.slide();
+  hud.updateMoves(session.state.moves);
+  hud.setUndoEnabled(session.state.canUndo);
+  session.view.moveMirror(entityId, outcome.pos);
+  session.beams.setPreview(null);
+  window.setTimeout(() => {
+    applyTrace();
+    if (outcome.justWon) beginWinSequence();
+  }, 210);
+}
+
 function onUndo(): void {
   if (!session) return;
   const outcome = session.state.undo();
   if (!outcome) return;
-  sfx.rotate(outcome.dir);
   hud.updateMoves(session.state.moves);
   hud.setUndoEnabled(session.state.canUndo);
-  session.view.rotateMirror(outcome.id, outcome.orient, outcome.dir);
+  if (outcome.kind === 'rotate') {
+    sfx.rotate(outcome.dir);
+    session.view.rotateMirror(outcome.id, outcome.orient, outcome.dir);
+  } else {
+    sfx.slide();
+    session.view.moveMirror(outcome.id, outcome.pos);
+  }
   window.setTimeout(() => applyTrace(), 240);
 }
 
@@ -187,6 +286,15 @@ function onHint(): void {
   for (const [id, orient] of Object.entries(solution) as [string, MirrorOrient][]) {
     if (session.state.orients.get(id) === orient) continue;
     if (session.view.showHintGhost(id, orient)) sfx.hint();
+    return;
+  }
+  // All orientations match: point at the first movable mirror off its rail cell.
+  const solutionPos = session.level.solutionPos;
+  if (!solutionPos) return;
+  for (const [id, pos] of Object.entries(solutionPos) as [string, GridPos][]) {
+    const cur = session.state.positions.get(id);
+    if (cur && cur.x === pos.x && cur.y === pos.y && cur.z === pos.z) continue;
+    if (session.view.showPosHintGhost(id, pos)) sfx.hint();
     return;
   }
 }
@@ -216,6 +324,7 @@ function resetLevel(): void {
   session.state.reset();
   for (const e of session.level.entities) {
     if (e.type === 'mirror') session.view.snapMirror(e.id, e.orient!);
+    if (e.type === 'mirror' && e.rail) session.view.snapMirrorPos(e.id, e.pos);
   }
   applyTrace();
   session.beams.reset();
@@ -237,7 +346,7 @@ setupPicking(ctx.renderer.domElement, ctx.camera, () => session?.view ?? null, (
   selectMirror(id);
 });
 
-/** Anchor the ⟲/⟳ buttons just above the selected mirror, every frame. */
+/** Anchor the rotate/slide buttons just above the selected mirror, every frame. */
 function updateRotator(): void {
   if (!selectedMirror || !session) return;
   const world = session.view.mirrorWorldPos(selectedMirror);
@@ -247,6 +356,10 @@ function updateRotator(): void {
   rotator.showAt(
     ((world.x + 1) / 2) * window.innerWidth,
     ((1 - world.y) / 2) * window.innerHeight,
+    {
+      rotatable: session.view.isMirrorRotatable(selectedMirror),
+      movable: session.view.isMirrorMovable(selectedMirror),
+    },
   );
 }
 
@@ -289,15 +402,32 @@ if (import.meta.env.DEV) {
     tick() {
       frame(performance.now());
     },
-    /** Rotate every mirror to the authored solution through the real input
-     *  path, taking the shorter spin direction like a real player would. */
+    /** Rotate every mirror to the authored solution and slide every rail
+     *  mirror to its solutionPos, all through the real input path — taking the
+     *  shorter spin direction like a real player would. */
     autoSolve(): void {
-      if (!session?.level.solution) return;
-      for (const [id, orient] of Object.entries(session.level.solution)) {
-        let guard = 0;
-        while (session.state.orients.get(id) !== orient && guard++ < 4) {
-          const cur = session.state.orients.get(id)!;
-          onRotate(id, MIRROR_CYCLE_REV[cur] === orient ? -1 : 1);
+      if (!session) return;
+      const { solution, solutionPos } = session.level;
+      if (solution) {
+        for (const [id, orient] of Object.entries(solution)) {
+          let guard = 0;
+          while (session.state.orients.get(id) !== orient && guard++ < 4) {
+            const cur = session.state.orients.get(id)!;
+            onRotate(id, MIRROR_CYCLE_REV[cur] === orient ? -1 : 1);
+          }
+        }
+      }
+      if (solutionPos) {
+        for (const [id, pos] of Object.entries(solutionPos)) {
+          const e = session.level.entities.find((x) => x.id === id);
+          if (!e?.rail) continue;
+          const axis = e.rail.axis;
+          let guard = 0;
+          while (guard++ < 16) {
+            const cur = session.state.positions.get(id);
+            if (!cur || cur[axis] === pos[axis]) break;
+            onSlide(id, cur[axis] < pos[axis] ? 1 : -1);
+          }
         }
       }
     },
