@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { DIR_VEC, MIRROR_PORTS } from '../core/beamTracer';
 import { COLOR_HEX, type Dir, type EntityDef, type GridPos, type LevelDef, type MirrorOrient } from '../core/types';
 import { tween } from './effects';
+import { getSparkTexture } from './sceneSetup';
 import { hazardTextures, metalTextures, rockTextures, tileTextures, wallTextures } from './textures';
 import { WORLD_THEMES, type WorldTheme } from './themes';
 
@@ -38,12 +39,19 @@ const FACING_ANGLE: Record<Dir, number> = {
 
 const PORTAL_HEX = 0xffa03d;
 
+/**
+ * NOTE: entity meshes deliberately use NO PointLights. Per-entity lights made
+ * the scene's light count differ between levels, which forces three.js to
+ * recompile every shader program on level load — a multi-second (sometimes
+ * tab-killing) stall on cold GPU caches. Emissive materials + bloom sell the
+ * glow at a fraction of the cost, and the light count stays constant.
+ */
 interface TargetView {
   crystal: THREE.Mesh;
   crystalMat: THREE.MeshStandardMaterial;
   halo: THREE.Mesh;
   haloMat: THREE.MeshBasicMaterial;
-  light: THREE.PointLight;
+  poolMat: THREE.MeshBasicMaterial;
   colorHex: number;
   lit: boolean;
   spinSpeed: number;
@@ -61,6 +69,7 @@ interface MirrorView {
 interface GateView {
   frameMat: THREE.MeshStandardMaterial;
   planeMat: THREE.MeshBasicMaterial;
+  poolMat: THREE.MeshBasicMaterial;
   open: boolean;
 }
 
@@ -68,7 +77,7 @@ interface EmitterView {
   tip: THREE.Mesh;
   tipMat: THREE.MeshBasicMaterial;
   bodyMat: THREE.MeshStandardMaterial;
-  light: THREE.PointLight;
+  poolMat: THREE.MeshBasicMaterial;
   colorHex: number;
   active: boolean;
 }
@@ -76,7 +85,8 @@ interface EmitterView {
 interface ForbiddenView {
   halo: THREE.Mesh;
   haloMat: THREE.MeshBasicMaterial;
-  light: THREE.PointLight;
+  crystalMat: THREE.MeshStandardMaterial;
+  poolMat: THREE.MeshBasicMaterial;
   hit: boolean;
 }
 
@@ -93,7 +103,8 @@ export class LevelView {
   private readonly gates = new Map<string, GateView>();
   private readonly emitters = new Map<string, EmitterView>();
   private readonly forbidden = new Map<string, ForbiddenView>();
-  private readonly tiles: { mesh: THREE.Mesh; phase: number; baseY: number }[] = [];
+  /** The whole floor bobs as one group: tiles are a single instanced draw. */
+  private readonly tileLayer = new THREE.Group();
   private readonly emitterTips: THREE.Mesh[] = [];
   private readonly spinners: { mesh: THREE.Object3D; speed: number; axis: 'x' | 'y' }[] = [];
   /** Additive arrowheads inside one-way gates that drift along the pass dir. */
@@ -123,10 +134,40 @@ export class LevelView {
     return gridToWorld(e.pos, this.level.gridSize);
   }
 
+  /**
+   * A soft additive gradient disc on the floor under a glowing device — sells
+   * "this thing illuminates its tile" without a real light (the scene's light
+   * count must stay constant; see the note above the view interfaces).
+   */
+  private lightPool(root: THREE.Group, colorHex: number, opacity: number, radius = 0.85): THREE.MeshBasicMaterial {
+    const mat = new THREE.MeshBasicMaterial({
+      map: getSparkTexture(),
+      color: colorHex,
+      transparent: true,
+      opacity,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    const pool = new THREE.Mesh(new THREE.PlaneGeometry(radius * 2, radius * 2), mat);
+    pool.rotation.x = -Math.PI / 2;
+    pool.position.y = 0.02;
+    root.add(pool);
+    return mat;
+  }
+
   /** Positions an entity root on its layer floor, adding a platform on upper layers. */
   private placeRoot(root: THREE.Group, e: EntityDef): void {
     const w = this.worldOf(e);
     root.position.set(w.x, e.pos.y, w.z);
+    // Solid meshes throw shadows; glow shells, pools and outlines must not.
+    root.traverse((obj) => {
+      const mesh = obj as THREE.Mesh;
+      if (!mesh.isMesh) return;
+      const mat = mesh.material as THREE.Material & { blending?: THREE.Blending };
+      if (mat.blending === THREE.AdditiveBlending) return;
+      if (mat.transparent && mat.opacity < 0.9) return;
+      mesh.castShadow = true;
+    });
     if (e.pos.y > 0) {
       const tiles = tileTextures(this.theme);
       const platform = new THREE.Mesh(
@@ -141,6 +182,8 @@ export class LevelView {
         }),
       );
       platform.position.y = -0.08;
+      platform.castShadow = true;
+      platform.receiveShadow = true;
       const edges = new THREE.LineSegments(
         new THREE.EdgesGeometry(platform.geometry),
         new THREE.LineBasicMaterial({ color: this.theme.edge, transparent: true, opacity: 0.6 }),
@@ -155,42 +198,61 @@ export class LevelView {
 
   private buildIsland(): void {
     const { x: gx, z: gz } = this.level.gridSize;
-    const tileGeo = new THREE.BoxGeometry(0.94, 0.18, 0.94);
-    const edgeGeo = new THREE.EdgesGeometry(new THREE.BoxGeometry(0.95, 0.19, 0.95));
     const tiles = tileTextures(this.theme);
 
+    // Every floor tile renders in ONE instanced draw call (checkerboard shade
+    // rides in instanceColor), and every tile outline in one merged
+    // LineSegments — versus one mesh + one material each, which cost a
+    // hundred-plus draw calls on the larger islands.
+    const count = gx * gz;
+    const tileMat = new THREE.MeshStandardMaterial({
+      map: tiles.map,
+      bumpMap: tiles.bumpMap,
+      bumpScale: 0.7,
+      color: 0xffffff,
+      roughness: 0.48,
+      metalness: 0.5,
+      emissive: 0x0a1830,
+      emissiveIntensity: 0.3,
+    });
+    const instanced = new THREE.InstancedMesh(new THREE.BoxGeometry(0.94, 0.18, 0.94), tileMat, count);
+    instanced.receiveShadow = true;
+    const edgeGeo = new THREE.EdgesGeometry(new THREE.BoxGeometry(0.95, 0.19, 0.95));
+    const edgePos = edgeGeo.getAttribute('position');
+    const merged = new Float32Array(count * edgePos.count * 3);
+
+    const m4 = new THREE.Matrix4();
+    const shadeColor = new THREE.Color();
+    let i = 0;
     for (let x = 0; x < gx; x++) {
       for (let z = 0; z < gz; z++) {
+        const w = gridToWorld({ x, y: 0, z }, this.level.gridSize);
+        m4.makeTranslation(w.x, -0.09, w.z);
+        instanced.setMatrixAt(i, m4);
         // Checkerboard tint so the grid is legible at a glance; contrast is
         // deliberately strong so the plating detail reads from play distance.
         const dark = (x + z) % 2 === 0;
         const shade = (dark ? 0.72 : 1.18) * (0.94 + Math.random() * 0.12);
-        const mat = new THREE.MeshStandardMaterial({
-          map: tiles.map,
-          bumpMap: tiles.bumpMap,
-          bumpScale: 0.7,
-          color: new THREE.Color(this.theme.tileTint).multiplyScalar(shade),
-          roughness: 0.48,
-          metalness: 0.5,
-          emissive: 0x0a1830,
-          emissiveIntensity: 0.3,
-        });
-        const tile = new THREE.Mesh(tileGeo, mat);
-        const w = gridToWorld({ x, y: 0, z }, this.level.gridSize);
-        const baseY = -0.09;
-        tile.position.set(w.x, baseY, w.z);
-        tile.receiveShadow = true;
-
-        const edges = new THREE.LineSegments(
-          edgeGeo,
-          new THREE.LineBasicMaterial({ color: this.theme.edge, transparent: true, opacity: 0.8 }),
-        );
-        tile.add(edges);
-
-        this.group.add(tile);
-        this.tiles.push({ mesh: tile, phase: Math.random() * Math.PI * 2, baseY });
+        instanced.setColorAt(i, shadeColor.set(this.theme.tileTint).multiplyScalar(shade));
+        for (let k = 0; k < edgePos.count; k++) {
+          const o = (i * edgePos.count + k) * 3;
+          merged[o] = edgePos.getX(k) + w.x;
+          merged[o + 1] = edgePos.getY(k) - 0.09;
+          merged[o + 2] = edgePos.getZ(k) + w.z;
+        }
+        i++;
       }
     }
+    edgeGeo.dispose();
+
+    const mergedGeo = new THREE.BufferGeometry();
+    mergedGeo.setAttribute('position', new THREE.BufferAttribute(merged, 3));
+    const edges = new THREE.LineSegments(
+      mergedGeo,
+      new THREE.LineBasicMaterial({ color: this.theme.edge, transparent: true, opacity: 0.8 }),
+    );
+    this.tileLayer.add(instanced, edges);
+    this.group.add(this.tileLayer);
 
     // Rocky shards hanging beneath the island so it reads as a floating rock.
     const rock = rockTextures();
@@ -358,10 +420,7 @@ export class LevelView {
     // Only lit tips pulse; dormant ones stay dark until activated.
     if (!dormant) this.emitterTips.push(tip);
 
-    const glow = new THREE.PointLight(colorHex, dormant ? 0 : 2.2, 4);
-    glow.position.copy(tip.position);
-    root.add(glow);
-
+    const poolMat = this.lightPool(root, colorHex, dormant ? 0 : 0.3);
     if (dormant) {
       // A lime beacon so it pairs visually with the switch crystal that wakes it.
       root.add(this.beacon());
@@ -369,7 +428,7 @@ export class LevelView {
         tip,
         tipMat,
         bodyMat,
-        light: glow,
+        poolMat,
         colorHex,
         active: false,
       });
@@ -473,12 +532,9 @@ export class LevelView {
     halo.position.y = 0.5;
     root.add(halo);
 
-    const light = new THREE.PointLight(colorHex, 0, 5);
-    light.position.y = 0.6;
-    root.add(light);
-
     // Switch crystals carry a lime beacon matching their linked device.
     if (e.activates) root.add(this.beacon());
+    const poolMat = this.lightPool(root, colorHex, 0.05);
 
     this.placeRoot(root, e);
     this.targets.set(e.id, {
@@ -486,7 +542,7 @@ export class LevelView {
       crystalMat,
       halo,
       haloMat,
-      light,
+      poolMat,
       colorHex,
       lit: false,
       spinSpeed: 0.5 + Math.random() * 0.3,
@@ -579,10 +635,7 @@ export class LevelView {
     const inner = new THREE.Mesh(new THREE.SphereGeometry(0.3, 18, 18), innerMat);
     inner.position.y = 0.5;
     root.add(inner);
-
-    const light = new THREE.PointLight(PORTAL_HEX, 1.6, 4);
-    light.position.y = 0.55;
-    root.add(light);
+    this.lightPool(root, PORTAL_HEX, 0.2);
 
     this.placeRoot(root, e);
   }
@@ -751,8 +804,9 @@ export class LevelView {
     planeBack.position.z = -0.075;
     root.add(planeBack);
 
+    const poolMat = this.lightPool(root, 0xff6633, 0.26);
     this.placeRoot(root, e);
-    this.gates.set(e.id, { frameMat, planeMat, open: false });
+    this.gates.set(e.id, { frameMat, planeMat, poolMat, open: false });
   }
 
   // ---------- dark (forbidden) crystal ----------
@@ -761,17 +815,15 @@ export class LevelView {
     const root = new THREE.Group();
     root.add(this.pedestal(0x330000));
 
-    const crystal = new THREE.Mesh(
-      new THREE.OctahedronGeometry(0.3, 0),
-      new THREE.MeshStandardMaterial({
-        color: 0x0a0406,
-        emissive: 0xff2233,
-        emissiveIntensity: 0.35,
-        roughness: 0.15,
-        metalness: 0.3,
-        flatShading: true,
-      }),
-    );
+    const crystalMat = new THREE.MeshStandardMaterial({
+      color: 0x0a0406,
+      emissive: 0xff2233,
+      emissiveIntensity: 0.35,
+      roughness: 0.15,
+      metalness: 0.3,
+      flatShading: true,
+    });
+    const crystal = new THREE.Mesh(new THREE.OctahedronGeometry(0.3, 0), crystalMat);
     crystal.position.y = 0.5;
     crystal.scale.y = 1.45;
     root.add(crystal);
@@ -797,12 +849,9 @@ export class LevelView {
     halo.position.y = 0.5;
     root.add(halo);
 
-    const light = new THREE.PointLight(0xff2233, 0, 5);
-    light.position.y = 0.55;
-    root.add(light);
-
+    const poolMat = this.lightPool(root, 0xff2233, 0);
     this.placeRoot(root, e);
-    this.forbidden.set(e.id, { halo, haloMat, light, hit: false });
+    this.forbidden.set(e.id, { halo, haloMat, crystalMat, poolMat, hit: false });
   }
 
   private buildMirror(e: EntityDef): void {
@@ -1072,15 +1121,15 @@ export class LevelView {
     if (!t || t.lit === lit) return;
     t.lit = lit;
     const fromEm = t.crystalMat.emissiveIntensity;
-    const toEm = lit ? 2.4 : 0.16;
+    const toEm = lit ? 2.8 : 0.16;
     const fromHalo = t.haloMat.opacity;
-    const toHalo = lit ? 0.28 : 0;
-    const fromLight = t.light.intensity;
-    const toLight = lit ? 3.5 : 0;
+    const toHalo = lit ? 0.34 : 0;
+    const fromPool = t.poolMat.opacity;
+    const toPool = lit ? 0.45 : 0.05;
     tween(lit ? 380 : 250, (k) => {
       t.crystalMat.emissiveIntensity = THREE.MathUtils.lerp(fromEm, toEm, k);
       t.haloMat.opacity = THREE.MathUtils.lerp(fromHalo, toHalo, k);
-      t.light.intensity = THREE.MathUtils.lerp(fromLight, toLight, k);
+      t.poolMat.opacity = THREE.MathUtils.lerp(fromPool, toPool, k);
     });
     if (lit) {
       // Ignition pop.
@@ -1100,9 +1149,12 @@ export class LevelView {
     const toOp = open ? 0.04 : 0.5;
     const fromEm = g.frameMat.emissiveIntensity;
     const toEm = open ? 0.08 : 0.5;
+    const fromPool = g.poolMat.opacity;
+    const toPool = open ? 0.04 : 0.26;
     tween(300, (k) => {
       g.planeMat.opacity = THREE.MathUtils.lerp(fromOp, toOp, k);
       g.frameMat.emissiveIntensity = THREE.MathUtils.lerp(fromEm, toEm, k);
+      g.poolMat.opacity = THREE.MathUtils.lerp(fromPool, toPool, k);
     });
   }
 
@@ -1120,15 +1172,15 @@ export class LevelView {
     }
     const fromOp = em.tipMat.opacity;
     const toOp = active ? 1 : 0.15;
-    const fromLight = em.light.intensity;
-    const toLight = active ? 2.2 : 0;
     const fromEm = em.bodyMat.emissiveIntensity;
-    const toEm = active ? 0.12 : 0.03;
+    const toEm = active ? 0.14 : 0.03;
+    const fromPool = em.poolMat.opacity;
+    const toPool = active ? 0.3 : 0;
     em.tipMat.transparent = true;
     tween(320, (k) => {
       em.tipMat.opacity = THREE.MathUtils.lerp(fromOp, toOp, k);
-      em.light.intensity = THREE.MathUtils.lerp(fromLight, toLight, k);
       em.bodyMat.emissiveIntensity = THREE.MathUtils.lerp(fromEm, toEm, k);
+      em.poolMat.opacity = THREE.MathUtils.lerp(fromPool, toPool, k);
     });
   }
 
@@ -1138,12 +1190,15 @@ export class LevelView {
     if (!f || f.hit === hit) return;
     f.hit = hit;
     const fromHalo = f.haloMat.opacity;
-    const toHalo = hit ? 0.5 : 0;
-    const fromLight = f.light.intensity;
-    const toLight = hit ? 4 : 0;
+    const toHalo = hit ? 0.55 : 0;
+    const fromEm = f.crystalMat.emissiveIntensity;
+    const toEm = hit ? 1.6 : 0.35;
+    const fromPool = f.poolMat.opacity;
+    const toPool = hit ? 0.5 : 0;
     tween(hit ? 220 : 320, (k) => {
       f.haloMat.opacity = THREE.MathUtils.lerp(fromHalo, toHalo, k);
-      f.light.intensity = THREE.MathUtils.lerp(fromLight, toLight, k);
+      f.crystalMat.emissiveIntensity = THREE.MathUtils.lerp(fromEm, toEm, k);
+      f.poolMat.opacity = THREE.MathUtils.lerp(fromPool, toPool, k);
     });
   }
 
@@ -1265,19 +1320,19 @@ export class LevelView {
   flareWin(): void {
     for (const t of this.targets.values()) {
       if (!t.lit) continue;
-      const baseLight = t.light.intensity;
+      const baseEm = t.crystalMat.emissiveIntensity;
       tween(1200, (k) => {
         const pulse = Math.sin(k * Math.PI * 3) * 0.5 + 0.5;
-        t.light.intensity = baseLight + pulse * 4;
-        t.haloMat.opacity = 0.28 + pulse * 0.25;
+        t.crystalMat.emissiveIntensity = baseEm + pulse * 2.2;
+        t.haloMat.opacity = 0.34 + pulse * 0.25;
+        t.poolMat.opacity = 0.45 + pulse * 0.3;
       });
     }
   }
 
   update(time: number, dt: number): void {
-    for (const tile of this.tiles) {
-      tile.mesh.position.y = tile.baseY + Math.sin(time * 0.8 + tile.phase) * 0.025;
-    }
+    // The floor breathes as one layer (the tiles are a single instanced mesh).
+    this.tileLayer.position.y = Math.sin(time * 0.8) * 0.02;
     for (const t of this.targets.values()) {
       t.crystal.rotation.y += dt * t.spinSpeed;
       if (t.lit) {
@@ -1351,6 +1406,8 @@ export class LevelView {
   dispose(scene: THREE.Scene): void {
     scene.remove(this.group);
     this.group.traverse((obj) => {
+      // InstancedMesh keeps extra per-instance GPU buffers of its own.
+      if ((obj as THREE.InstancedMesh).isInstancedMesh) (obj as THREE.InstancedMesh).dispose();
       const mesh = obj as THREE.Mesh;
       if (mesh.geometry) mesh.geometry.dispose();
       const mat = (obj as THREE.Mesh).material as THREE.Material | THREE.Material[] | undefined;

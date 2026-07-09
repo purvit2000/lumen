@@ -5,6 +5,7 @@ import { saveResult } from './core/progress';
 import { LEVELS } from './levels';
 import { sfx } from './audio/sfx';
 import { createSceneContext } from './render/sceneSetup';
+import { tileTextures, wallTextures } from './render/textures';
 import { themeForMission } from './render/themes';
 import { LevelView, gridToWorld } from './render/entityMeshes';
 import { BeamRenderer } from './render/beamRenderer';
@@ -179,6 +180,20 @@ function startLevel(index: number): void {
   hud.show();
   menu.hide();
   aimCameraForLevel(controls, ctx.camera, level);
+
+  // Warm the next act's canvas textures while the player is busy so the act
+  // transition doesn't hitch on synchronous generation.
+  const nextTheme = themeForMission(index + 1);
+  if (nextTheme !== theme) {
+    const warm = () => {
+      tileTextures(nextTheme);
+      wallTextures(nextTheme);
+    };
+    // requestIdleCallback is missing in Safari; fall back to a lazy timeout.
+    const idle = (window as { requestIdleCallback?: (cb: () => void) => void }).requestIdleCallback;
+    if (idle) idle(warm);
+    else window.setTimeout(warm, 1500);
+  }
 }
 
 function showMenu(): void {
@@ -191,11 +206,22 @@ function showMenu(): void {
   aimCameraForMenu(controls, ctx.camera);
 }
 
-function applyTrace(): void {
+/** Current grid cell of a mirror (rail mirrors move; others sit at their def pos). */
+function mirrorCell(id: string): GridPos | null {
+  if (!session) return null;
+  return session.state.positions.get(id) ?? session.level.entities.find((e) => e.id === id)?.pos ?? null;
+}
+
+/**
+ * `raceFrom` = the cell(s) the player just changed: the beam re-races only
+ * from there instead of restarting at the emitters (level start and reset
+ * pass nothing and get the full race).
+ */
+function applyTrace(raceFrom?: GridPos[]): void {
   if (!session) return;
   const { state, view, level } = session;
   const result = state.trace;
-  session.beams.setTrace(result);
+  session.beams.setTrace(result, raceFrom);
 
   let anyIgnited = false;
   for (const e of level.entities) {
@@ -235,16 +261,18 @@ function onRotate(entityId: string, direction: RotateDir = 1): void {
   hud.updateMoves(session.state.moves);
   hud.setUndoEnabled(session.state.canUndo);
   session.view.rotateMirror(entityId, outcome.orient, direction);
+  const cell = mirrorCell(entityId);
   // Game logic runs on a timer, not the tween: rendering may be throttled
   // (background tab), and the win must still register.
   window.setTimeout(() => {
-    applyTrace();
+    applyTrace(cell ? [cell] : []);
     if (outcome.justWon) beginWinSequence();
   }, 240);
 }
 
 function onSlide(entityId: string, step: SlideStep): void {
   if (!session) return;
+  const before = session.state.positions.get(entityId);
   const outcome = session.state.moveMirror(entityId, step);
   if (!outcome) {
     sfx.blocked();
@@ -255,8 +283,11 @@ function onSlide(entityId: string, step: SlideStep): void {
   hud.setUndoEnabled(session.state.canUndo);
   session.view.moveMirror(entityId, outcome.pos);
   session.beams.setPreview(null);
+  // Race from wherever the beam meets the mirror — its new cell or, if it
+  // slid off the path, the cell it just vacated.
+  const anchors: GridPos[] = before ? [outcome.pos, { ...before }] : [outcome.pos];
   window.setTimeout(() => {
-    applyTrace();
+    applyTrace(anchors);
     if (outcome.justWon) beginWinSequence();
   }, 210);
 }
@@ -267,14 +298,18 @@ function onUndo(): void {
   if (!outcome) return;
   hud.updateMoves(session.state.moves);
   hud.setUndoEnabled(session.state.canUndo);
+  let anchors: GridPos[];
   if (outcome.kind === 'rotate') {
     sfx.rotate(outcome.dir);
     session.view.rotateMirror(outcome.id, outcome.orient, outcome.dir);
+    const cell = mirrorCell(outcome.id);
+    anchors = cell ? [cell] : [];
   } else {
     sfx.slide();
     session.view.moveMirror(outcome.id, outcome.pos);
+    anchors = [outcome.pos];
   }
-  window.setTimeout(() => applyTrace(), 240);
+  window.setTimeout(() => applyTrace(anchors), 240);
 }
 
 function onHint(): void {
@@ -389,6 +424,8 @@ if (import.meta.env.DEV) {
   // Debug handle for automated play-testing; stripped from prod builds.
   (window as unknown as Record<string, unknown>).__lumen = {
     camera: ctx.camera,
+    renderer: ctx.renderer,
+    composer: ctx.composer,
     levels: LEVELS,
     startLevel,
     showMenu,

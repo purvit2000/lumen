@@ -3,8 +3,75 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
-import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import type { WorldTheme } from './themes';
+
+/**
+ * The chain's final pass: does OutputPass's job (AgX tone mapping + sRGB
+ * encode — hardcoded because the game never changes either) and the grade in
+ * one fullscreen shader: gentle vignette, animated film grain, radial
+ * chromatic aberration toward the corners, and a per-act lift/gain tint so
+ * each world carries its own color mood. Folding the two passes together
+ * saves a full-screen render pass per frame.
+ */
+const GradeShader = {
+  name: 'LumenGradeShader',
+  uniforms: {
+    tDiffuse: { value: null as THREE.Texture | null },
+    toneMappingExposure: { value: 1 },
+    time: { value: 0 },
+    lift: { value: new THREE.Color(0x000000) },
+    gain: { value: new THREE.Color(0xffffff) },
+    vignette: { value: 0.42 },
+    grain: { value: 0.024 },
+    aberration: { value: 0.55 },
+  },
+  vertexShader: /* glsl */ `
+    varying vec2 vUv;
+    void main() {
+      vUv = uv;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    }
+  `,
+  fragmentShader: /* glsl */ `
+    uniform sampler2D tDiffuse;
+    uniform float time;
+    uniform vec3 lift;
+    uniform vec3 gain;
+    uniform float vignette;
+    uniform float grain;
+    uniform float aberration;
+    varying vec2 vUv;
+
+    // AgXToneMapping / sRGBTransferOETF / toneMappingExposure all come from
+    // the tonemapping+colorspace chunks three prepends to every ShaderMaterial.
+
+    void main() {
+      vec2 centered = vUv - 0.5;
+      float r2 = dot(centered, centered);
+
+      // Chromatic aberration grows quadratically toward the corners so the
+      // center of the frame stays perfectly sharp.
+      vec2 caOff = centered * r2 * aberration * 0.012;
+      float cr = texture2D(tDiffuse, vUv - caOff).r;
+      vec4 base = texture2D(tDiffuse, vUv);
+      float cb = texture2D(tDiffuse, vUv + caOff).b;
+
+      // HDR in; tone-map to display range before grading.
+      vec3 col = AgXToneMapping(vec3(cr, base.g, cb));
+
+      // Lift/gain: tint shadows toward the act accent, barely kiss highlights.
+      col = col * gain + lift * (1.0 - col);
+
+      col *= 1.0 - vignette * smoothstep(0.12, 0.72, r2);
+
+      float n = fract(sin(dot(vUv + fract(time), vec2(12.9898, 78.233))) * 43758.5453);
+      col += (n - 0.5) * grain;
+
+      gl_FragColor = sRGBTransferOETF(vec4(col, base.a));
+    }
+  `,
+};
 
 export interface SceneContext {
   scene: THREE.Scene;
@@ -21,10 +88,17 @@ const BG_COLOR = 0x05070f;
 
 export function createSceneContext(container: HTMLElement): SceneContext {
   const renderer = new THREE.WebGLRenderer({ antialias: true });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  // 1.5 is plenty through the bloom pass; full retina doubles the fill cost
+  // for detail the glow softens away anyway.
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
   renderer.setSize(window.innerWidth, window.innerHeight);
-  renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.45;
+  // AgX rolls highlights off far more gracefully than ACES on neon emissives
+  // (beams keep hue instead of clipping to white). It runs darker, hence the
+  // higher exposure.
+  renderer.toneMapping = THREE.AgXToneMapping;
+  renderer.toneMappingExposure = 1.6;
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   container.appendChild(renderer.domElement);
 
   const scene = new THREE.Scene();
@@ -41,6 +115,19 @@ export function createSceneContext(container: HTMLElement): SceneContext {
   scene.add(new THREE.HemisphereLight(0x5a6f9c, 0x141826, 1.5));
   const keyLight = new THREE.DirectionalLight(0xeaf2ff, 2.3);
   keyLight.position.set(6, 12, 4);
+  // The one shadow caster: a tight ortho frustum around the island keeps the
+  // 2048 map crisp on every grid size. Light count never changes, so this
+  // costs one constant depth pass — no shader recompiles.
+  keyLight.castShadow = true;
+  keyLight.shadow.mapSize.set(2048, 2048);
+  keyLight.shadow.camera.left = -8;
+  keyLight.shadow.camera.right = 8;
+  keyLight.shadow.camera.top = 8;
+  keyLight.shadow.camera.bottom = -8;
+  keyLight.shadow.camera.near = 2;
+  keyLight.shadow.camera.far = 32;
+  keyLight.shadow.bias = -0.0004;
+  keyLight.shadow.normalBias = 0.03;
   scene.add(keyLight);
   const fillLight = new THREE.DirectionalLight(0xbcd0ff, 0.85);
   fillLight.position.set(-5, 6, 8);
@@ -56,16 +143,32 @@ export function createSceneContext(container: HTMLElement): SceneContext {
   const dust = buildDust();
   scene.add(dust);
 
-  const composer = new EffectComposer(renderer);
+  // The composer replaces the canvas's own MSAA, so bring it back on the
+  // composer's render target — without it every geometry edge shimmers.
+  const bufferSize = renderer.getDrawingBufferSize(new THREE.Vector2());
+  const composer = new EffectComposer(
+    renderer,
+    new THREE.WebGLRenderTarget(bufferSize.width, bufferSize.height, {
+      type: THREE.HalfFloatType,
+      // 2x MSAA reads nearly as clean as 4x through the bloom+grain grade and
+      // costs half the resolve bandwidth — the difference funds 60fps.
+      samples: 2,
+    }),
+  );
   composer.addPass(new RenderPass(scene, camera));
+  // Half-resolution bloom: visually indistinguishable for a soft glow and
+  // one quarter of the pass's fill cost.
   const bloom = new UnrealBloomPass(
-    new THREE.Vector2(window.innerWidth, window.innerHeight),
+    new THREE.Vector2(window.innerWidth / 2, window.innerHeight / 2),
     0.85,
     0.6,
     0.8,
   );
   composer.addPass(bloom);
-  composer.addPass(new OutputPass());
+  // The grade pass is also the output pass (tone map + sRGB); see GradeShader.
+  const grade = new ShaderPass(GradeShader);
+  grade.uniforms.toneMappingExposure.value = renderer.toneMappingExposure;
+  composer.addPass(grade);
 
   window.addEventListener('resize', () => {
     camera.aspect = window.innerWidth / window.innerHeight;
@@ -79,11 +182,18 @@ export function createSceneContext(container: HTMLElement): SceneContext {
     dust.rotation.y += dt * 0.02;
     dust.position.y = Math.sin(time * 0.25) * 0.25;
     nebulae.rotation.y += dt * 0.002;
+    grade.uniforms.time.value = time % 100;
   };
 
   const applyTheme = (theme: WorldTheme) => {
     rimLight.color.setHex(theme.accent);
     nebulaMats.forEach((m, i) => m.color.setHex(theme.nebulae[i % theme.nebulae.length]));
+    // Shadows lean toward the act accent; highlights get the faintest kiss of
+    // it — enough to shift the mood, never enough to stain the whites.
+    (grade.uniforms.lift.value as THREE.Color).setHex(theme.accent).multiplyScalar(0.05);
+    (grade.uniforms.gain.value as THREE.Color)
+      .setHex(0xffffff)
+      .lerp(new THREE.Color(theme.accent), 0.06);
   };
 
   return { scene, camera, renderer, composer, updateAmbience, applyTheme };
